@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { signInWithGoogleViaExtension } from '../lib/googleAuth';
 import { translations, type Language } from '../lib/i18n';
 import '../index.css';
 
@@ -84,16 +85,10 @@ const Auth = () => {
         setError(null);
 
         try {
-            const { error } = await supabase.auth.signInWithOAuth({
-                provider: 'google',
-                options: {
-                    redirectTo: chrome.runtime.getURL('/src/sidepanel/index.html')
-                }
-            });
-
-            if (error) throw error;
+            await signInWithGoogleViaExtension();
+            window.location.href = '/src/sidepanel/index.html';
         } catch (err) {
-            console.error(err);
+            console.error('Google Auth error:', err);
             setError((err as Error).message);
         } finally {
             setLoading(false);
@@ -105,7 +100,7 @@ const Auth = () => {
             <div className="bg-white rounded-2xl border border-gray-200 p-8 w-full max-w-md">
                 <div className="text-center mb-8">
                     <h1 className="text-3xl font-bold text-gray-900 mb-2 flex items-center justify-center gap-2">
-                        <span className="text-4xl">📻</span> ReMixIt
+                        <img src="/RedIcon512.png" alt="ReMorphIt" className="w-10 h-10" /> ReMorphIt
                     </h1>
                     <p className="text-gray-600">
                         {isLogin ? t('auth.sublogin') : t('auth.subsignup')}

@@ -39,6 +39,8 @@ export const translations = {
             refreshPage: 'Refresh web page',
             manualDetection: 'Manual detection',
             note: 'Note',
+            supportedPlatforms: 'Supported platforms',
+            andMore: 'and more...',
         },
         templates: {
             freeUsage: 'Free usage',
@@ -159,6 +161,8 @@ export const translations = {
             refreshPage: 'Rafraîchir la page web',
             manualDetection: 'Détection manuelle',
             note: 'Note',
+            supportedPlatforms: 'Plateformes supportées',
+            andMore: 'et plus...',
         },
         templates: {
             freeUsage: 'Utilisation gratuite',

@@ -1,4 +1,4 @@
-# Spécifications du Projet : ReMixIt Extension
+# Spécifications du Projet : ReMorphIt Extension
 
 ## 1. Vision
 Une extension de navigateur (Chrome/Brave/Edge) qui agit comme un pont intelligent entre le contenu web consommé par l'utilisateur et ses workflows d'automatisation (n8n). L'objectif est de transformer, résumer ou reformater n'importe quel contenu web à la volée.
@@ -26,7 +26,7 @@ Nous utiliserons une architecture "Client lourd / Backend délégué" :
 ### B. Utilisation Quotidienne (Option Clic-droit)
 1.  L'utilisateur est sur une page (ex: un article de blog).
 2.  Il sélectionne du texte (optionnel).
-3.  Fait un **Clic-droit** > "ReMixIt" > Sélectionne un template (ex: "Thread Twitter").
+3.  Fait un **Clic-droit** > "ReMorphIt" > Sélectionne un template (ex: "Thread Twitter").
 4.  Une **Side Panel** (panneau latéral Chrome) s'ouvre.
     *   *État 1* : "Analyse en cours..." (L'extension extrait le contenu de la page pour compléter la sélection).
     *   *État 2* : "Traitement..." (Envoi au webhook n8n).

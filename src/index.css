@@ -18,7 +18,7 @@
 }
 
 /* Floating Toggle Button Styles */
-#remixit-toggle-btn {
+#remorphit-toggle-btn {
   position: fixed;
   top: 50%;
   right: 0;
@@ -39,12 +39,12 @@
   font-family: sans-serif;
 }
 
-#remixit-toggle-btn:hover {
+#remorphit-toggle-btn:hover {
   width: 50px;
   background-color: #b91c1c;
 }
 
-#remixit-toggle-btn svg {
+#remorphit-toggle-btn svg {
   width: 24px;
   height: 24px;
 }

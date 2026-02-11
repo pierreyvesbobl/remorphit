@@ -1,11 +1,12 @@
 {
-  "name": "remixit_extension",
+  "name": "remorphit",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:landing": "vite build --config vite.config.landing.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },

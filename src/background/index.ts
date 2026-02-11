@@ -1,16 +1,15 @@
 // Background script
-console.log('ReMixIt Background Script Loaded');
 
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
-        id: 'remixit-main',
-        title: 'ReMixIt : Transformer ce contenu',
+        id: 'remorphit-main',
+        title: 'ReMorphIt : Transformer ce contenu',
         contexts: ['selection', 'page'],
     });
 });
 
 chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) => {
-    if (info.menuItemId === 'remixit-main') {
+    if (info.menuItemId === 'remorphit-main') {
         // Open the side panel
         // Note: chrome.sidePanel.open is only available in user-gesture context.
         // Making sure we open the side panel on the current window.
@@ -27,6 +26,27 @@ chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData
             });
         }
     }
+});
+
+// Relay tab navigation events to side panel via chrome.storage.session
+// This is the most reliable IPC in Chrome extensions - storage.onChanged
+// fires in ALL extension contexts (side panel, popup, options page).
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (tab.active && (changeInfo.status === 'complete' || changeInfo.url)) {
+        chrome.storage.session.set({
+            activeTabChange: { tabId, url: tab.url, ts: Date.now() }
+        });
+    }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+    chrome.tabs.get(activeInfo.tabId, (tab) => {
+        if (tab?.url) {
+            chrome.storage.session.set({
+                activeTabChange: { tabId: activeInfo.tabId, url: tab.url, ts: Date.now() }
+            });
+        }
+    });
 });
 
 // Handle messages

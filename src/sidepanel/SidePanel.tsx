@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import { signInWithGoogleViaExtension } from '../lib/googleAuth';
 import { translations, type Language } from '../lib/i18n';
 import '../index.css';
 
@@ -39,10 +40,7 @@ interface HistoryItem {
     tokens_used?: number;
     created_at: string;
 }
-console.log('--- SIDEPANEL SCRIPT OK ---');
-
 const SidePanel = () => {
-    console.log('--- Composant SidePanel monté ---');
     const [article, setArticle] = useState<ArticleData | null>(null);
     const [templates, setTemplates] = useState<Template[]>([]);
     const [loading, setLoading] = useState(false);
@@ -175,8 +173,6 @@ const SidePanel = () => {
     };
 
     const extractContent = useCallback(async (tabId?: number) => {
-        console.log('Attempting content extraction...', tabId ? `Target tab: ${tabId}` : 'Target: active tab');
-
         // Reset states
         setError(null);
         setSuccessMessage(null);
@@ -186,7 +182,7 @@ const SidePanel = () => {
         try {
             let targetId = tabId;
             if (!targetId) {
-                const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 targetId = tab?.id;
             }
 
@@ -194,13 +190,10 @@ const SidePanel = () => {
                 throw new Error("No active tab found");
             }
 
-            console.log(`Sending EXTRACT_CONTENT to tab ${targetId}`);
             // Send message to content script
             const response = await chrome.tabs.sendMessage(targetId, { action: 'EXTRACT_CONTENT' });
 
             if (response && response.success) {
-                console.log('Extraction success:', response.data.title);
-
                 // Generate a content-based ID for posts without postId (Facebook)
                 const contentId = response.data.postId ||
                     `${response.data.siteName}-${response.data.textContent?.substring(0, 50) || ''}-${response.data.images?.length || 0}`;
@@ -209,7 +202,6 @@ const SidePanel = () => {
                 // Skip this check for Facebook to always get fresh content
                 const isFacebook = response.data.siteName === 'Facebook';
                 if (!isFacebook && contentId === lastPostIdRef.current) {
-                    console.log('Same content, skipping update');
                     setLoading(false);
                     return;
                 }
@@ -220,17 +212,15 @@ const SidePanel = () => {
                 // Safety check for YouTube/Twitter URLs...
                 // Normalize URLs by removing query parameters before comparing to avoid stale matching issues
                 const normalizeUrl = (u: string) => u.split(/[?#]/)[0];
-                const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+                const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-                if (activeTab?.url && normalizeUrl(response.data.url) !== normalizeUrl(activeTab.url) && !activeTab.url.includes('linkedin.com/feed')) {
-                    console.log('Stale content detected (normalized comparison), retrying in 1s...');
+                if (activeTab?.url && normalizeUrl(response.data.url) !== normalizeUrl(activeTab.url) && !activeTab.url.includes('linkedin.com/feed') && !activeTab.url.includes('x.com') && !activeTab.url.includes('twitter.com') && !activeTab.url.includes('facebook.com') && !activeTab.url.includes('youtube.com') && !activeTab.url.includes('instagram.com')) {
                     setTimeout(() => extractContent(targetId), 1000);
                     return;
                 }
 
                 setArticle(response.data);
             } else {
-                console.log('Extraction failed or returned no data:', response?.error);
                 // Silently ignore "Failed to parse content" as requested
                 if (response?.error === "Failed to parse content.") {
                     setArticle(null);
@@ -294,23 +284,15 @@ const SidePanel = () => {
             });
 
             if (response && response.success) {
-                console.log('🔍 Raw response.data:', response.data);
-
                 // n8n returns an array usually, we take the first item or the object itself
                 let resultData = Array.isArray(response.data) ? response.data[0] : response.data;
-                console.log('🔍 After array extraction:', resultData);
 
                 // If the data is wrapped in an 'output' property, unwrap it
                 if (resultData && resultData.output) {
                     resultData = resultData.output;
-                    console.log('🔍 After unwrapping output:', resultData);
                 }
 
                 if (resultData) {
-                    console.log('🔍 Final resultData:', resultData);
-                    console.log('🔍 resultData.error:', resultData.error);
-                    console.log('🔍 resultData.title:', resultData.title);
-                    console.log('🔍 resultData.content:', resultData.content);
 
                     if (resultData.error === true) {
                         setError(resultData.message || "Erreur lors de la génération.");
@@ -323,8 +305,6 @@ const SidePanel = () => {
                         title: resultData.title || article.title,
                         content: resultData.content || '',
                     };
-
-                    console.log('🔍 contentToDisplay:', contentToDisplay);
 
                     setSuccessMessage(resultData.message || "Contenu généré avec succès !");
 
@@ -397,6 +377,25 @@ const SidePanel = () => {
         };
 
         checkAuth();
+
+        // Listen for auth state changes (e.g., login from auth page)
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(
+            (event, session) => {
+                if (event === 'SIGNED_IN' && session) {
+                    setUser(session.user);
+                    extractContent();
+                    fetchTemplates();
+                    fetchHistory();
+                    fetchProfile();
+                } else if (event === 'SIGNED_OUT') {
+                    setUser(null);
+                }
+            }
+        );
+
+        return () => {
+            subscription.unsubscribe();
+        };
     }, [extractContent]);
 
     // Ultra-reliable tab change detection
@@ -404,71 +403,83 @@ const SidePanel = () => {
     const lastPostIdRef = useRef<string>('');
 
     useEffect(() => {
-        // We initialize listeners even if user is not yet loaded
-        // to be ready as soon as the session is recovered.
+        let extractionTimer: any = null;
 
-        const checkAndRefresh = async (forcedTabId?: number, forcedUrl?: string) => {
-            try {
-                const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-                const tabId = forcedTabId || activeTab?.id;
-                const url = forcedUrl || activeTab?.url;
+        const triggerExtraction = (tabId: number, url: string) => {
+            if (url === lastUrlRef.current) return;
 
+            lastUrlRef.current = url;
+            lastPostIdRef.current = '';
+
+            if (extractionTimer) clearTimeout(extractionTimer);
+
+            // Delay for YouTube SPA (DOM needs time to update after URL change)
+            const delay = url.includes('youtube.com') ? 2500 : 500;
+            extractionTimer = setTimeout(() => {
+                extractContent(tabId);
+            }, delay);
+        };
+
+        // PRIMARY: listen for tab changes via chrome.storage.session
+        // Background script writes to storage.session on every tab update/activate.
+        // storage.onChanged is the most reliable cross-context IPC in Chrome extensions.
+        const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+            if (areaName === 'session' && changes.activeTabChange?.newValue) {
+                const { tabId, url } = changes.activeTabChange.newValue as { tabId: number; url: string; ts: number };
                 if (tabId && url) {
-                    const urlChanged = url !== lastUrlRef.current;
-
-                    if (urlChanged || forcedTabId) {
-                        // Update ref immediately to "lock" this URL
-                        lastUrlRef.current = url;
-                        console.log('Refresh trigger - URL:', url, 'Changed:', urlChanged);
-
-                        // Use a longer delay for YouTube (they take time to update DOM after URL change)
-                        const delay = url.includes('youtube.com') ? 1500 : 300;
-
-                        setTimeout(() => {
-                            extractContent(tabId);
-                        }, delay);
-                    }
+                    triggerExtraction(tabId, url);
                 }
-            } catch (e) {
-                console.error('Check refresh failed:', e);
             }
         };
 
-        const handleTabUpdate = (tabId: number, changeInfo: any, tab: chrome.tabs.Tab) => {
-            if (tab.active && (changeInfo.status === 'complete' || changeInfo.url)) {
-                checkAndRefresh(tabId, tab.url);
-            }
-        };
+        chrome.storage.onChanged.addListener(handleStorageChange);
 
-        const handleTabActivated = (activeInfo: any) => {
-            checkAndRefresh(activeInfo.tabId);
-        };
-
-        // Listen for messages from content script (like scrolls)
+        // Listen for SCROLL_DETECTED from content scripts (social feed scrolling)
         const handleMessage = (message: any) => {
             if (message.action === 'SCROLL_DETECTED') {
-                // For scroll, we always want to try extraction
-                // because URL doesn't change on LinkedIn feed
-                chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-                    if (tabs[0]?.id && user) {
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs[0]?.id) {
+                        lastPostIdRef.current = '';
                         extractContent(tabs[0].id);
                     }
                 });
             }
         };
 
-        chrome.tabs.onUpdated.addListener(handleTabUpdate);
-        chrome.tabs.onActivated.addListener(handleTabActivated);
         chrome.runtime.onMessage.addListener(handleMessage);
 
-        checkAndRefresh();
+        // BACKUP: poll active tab URL every 1s (no window filter for max compatibility)
+        const urlPollInterval = setInterval(async () => {
+            try {
+                const tabs = await chrome.tabs.query({ active: true });
+                const tab = tabs[0];
+                if (tab?.id && tab?.url && tab.url !== lastUrlRef.current) {
+                    triggerExtraction(tab.id, tab.url);
+                }
+            } catch (e) { /* ignore */ }
+        }, 1000);
+
+        // Initial extraction on mount
+        (async () => {
+            try {
+                const tabs = await chrome.tabs.query({ active: true });
+                const tab = tabs[0];
+                if (tab?.id && tab?.url) {
+                    lastUrlRef.current = tab.url;
+                    extractContent(tab.id);
+                }
+            } catch (e) {
+                console.error('[SidePanel] Initial extraction failed:', e);
+            }
+        })();
 
         return () => {
-            chrome.tabs.onUpdated.removeListener(handleTabUpdate);
-            chrome.tabs.onActivated.removeListener(handleTabActivated);
+            chrome.storage.onChanged.removeListener(handleStorageChange);
             chrome.runtime.onMessage.removeListener(handleMessage);
+            clearInterval(urlPollInterval);
+            if (extractionTimer) clearTimeout(extractionTimer);
         };
-    }, [user, extractContent]);
+    }, [extractContent]);
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
@@ -492,6 +503,28 @@ const SidePanel = () => {
                 }
             }
         } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleGoogleAuth = async () => {
+        setLoading(true);
+        setError(null);
+
+        try {
+            await signInWithGoogleViaExtension();
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session) {
+                setUser(session.user);
+                extractContent();
+                fetchTemplates();
+                fetchHistory();
+                fetchProfile();
+            }
+        } catch (err) {
+            console.error('Google Auth error:', err);
             setError((err as Error).message);
         } finally {
             setLoading(false);
@@ -669,7 +702,7 @@ const SidePanel = () => {
                 <div className="bg-white rounded-2xl border border-gray-200 p-6 w-full max-w-sm">
                     <div className="text-center mb-6">
                         <h1 className="text-2xl font-bold text-gray-900 flex items-center justify-center gap-2">
-                            <span className="text-3xl">📻</span> ReMixIt
+                            <img src="/RedIcon512.png" alt="ReMorphIt" className="w-8 h-8" /> ReMorphIt
                         </h1>
                         <p className="text-gray-600 text-sm mt-1">
                             {isLogin ? t('auth.sublogin') : t('auth.subsignup')}
@@ -724,6 +757,31 @@ const SidePanel = () => {
                             {loading ? t('auth.loading') : isLogin ? t('auth.login') : t('auth.signup')}
                         </button>
                     </form>
+
+                    <div className="mt-4">
+                        <div className="relative">
+                            <div className="absolute inset-0 flex items-center">
+                                <div className="w-full border-t border-gray-300"></div>
+                            </div>
+                            <div className="relative flex justify-center text-xs">
+                                <span className="px-2 bg-white text-gray-500">{t('auth.orContinueWith')}</span>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={handleGoogleAuth}
+                            disabled={loading}
+                            className="mt-3 w-full flex items-center justify-center gap-2 bg-white border border-gray-300 text-gray-700 py-2.5 rounded-lg font-semibold hover:bg-gray-50 transition disabled:opacity-50 text-sm"
+                        >
+                            <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                            </svg>
+                            Google
+                        </button>
+                    </div>
 
                     <div className="mt-4 text-center">
                         <button
@@ -822,7 +880,7 @@ const SidePanel = () => {
                                     <button
                                         onClick={() => {
                                             const text = generatedContent.content.replace(/<[^>]*>/g, '');
-                                            window.open(`mailto:?subject=${encodeURIComponent(generatedContent.title || 'ReMixIt Content')}&body=${encodeURIComponent(text)}`, '_blank');
+                                            window.open(`mailto:?subject=${encodeURIComponent(generatedContent.title || 'ReMorphIt Content')}&body=${encodeURIComponent(text)}`, '_blank');
                                             setShowShareMenu(false);
                                         }}
                                         className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
@@ -835,7 +893,7 @@ const SidePanel = () => {
                                             if (navigator.share) {
                                                 try {
                                                     await navigator.share({
-                                                        title: generatedContent.title || 'ReMixIt Content',
+                                                        title: generatedContent.title || 'ReMorphIt Content',
                                                         text: text,
                                                         url: window.location.href
                                                     });
@@ -915,7 +973,7 @@ const SidePanel = () => {
 
                                     {/* Main scanner circle */}
                                     <div className="relative bg-white h-24 w-24 rounded-full border border-gray-200 border-4 border-white flex items-center justify-center text-4xl overflow-hidden z-10 transition-transform hover:scale-105 duration-300">
-                                        <span className={loading ? "animate-bounce" : ""}>📡</span>
+                                        <img src="/scan.webp" alt="" className={`w-24 h-24 ${loading ? "animate-bounce" : ""}`} />
                                         {/* Horizontal scan line */}
                                         {loading && <div className="absolute left-0 right-0 h-1 bg-remix-400/40 animate-scan z-20"></div>}
                                     </div>
@@ -957,6 +1015,38 @@ const SidePanel = () => {
                                         {error}
                                     </div>
                                 )}
+
+                                {/* Supported platforms */}
+                                <div className="mt-10 w-full max-w-[280px]">
+                                    <p className="text-[10px] font-bold text-gray-300 uppercase tracking-widest mb-3 text-center">{t('scanner.supportedPlatforms')}</p>
+                                    <div className="flex items-center justify-center gap-4 flex-wrap">
+                                        {/* YouTube */}
+                                        <div className="group relative">
+                                            <svg className="w-6 h-6 text-gray-300 hover:text-[#FF0000] transition-colors duration-200" viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+                                        </div>
+                                        {/* X (Twitter) */}
+                                        <div className="group relative">
+                                            <svg className="w-5 h-5 text-gray-300 hover:text-black transition-colors duration-200" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                                        </div>
+                                        {/* Instagram */}
+                                        <div className="group relative">
+                                            <svg className="w-5 h-5 text-gray-300 hover:text-[#E4405F] transition-colors duration-200" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/></svg>
+                                        </div>
+                                        {/* Facebook */}
+                                        <div className="group relative">
+                                            <svg className="w-5 h-5 text-gray-300 hover:text-[#1877F2] transition-colors duration-200" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                                        </div>
+                                        {/* LinkedIn */}
+                                        <div className="group relative">
+                                            <svg className="w-5 h-5 text-gray-300 hover:text-[#0A66C2] transition-colors duration-200" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                                        </div>
+                                        {/* News / Globe */}
+                                        <div className="group relative flex items-center gap-1">
+                                            <svg className="w-5 h-5 text-gray-300 hover:text-remix-500 transition-colors duration-200" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                            <span className="text-[10px] text-gray-300 font-medium">{t('scanner.andMore')}</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         ) : (
                             <div className="space-y-4 animate-in fade-in slide-in-from-top-1 duration-500">
@@ -1399,6 +1489,25 @@ const SidePanel = () => {
                                         </form>
                                     )}
                                 </div>
+
+                                {/* Supported platforms footer */}
+                                <div className="pt-4 mt-2 border-t border-gray-100">
+                                    <div className="flex items-center justify-center gap-3">
+                                        {/* YouTube */}
+                                        <svg className="w-4 h-4 text-gray-200 hover:text-[#FF0000] transition-colors" viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+                                        {/* X */}
+                                        <svg className="w-3.5 h-3.5 text-gray-200 hover:text-black transition-colors" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                                        {/* Instagram */}
+                                        <svg className="w-3.5 h-3.5 text-gray-200 hover:text-[#E4405F] transition-colors" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/></svg>
+                                        {/* Facebook */}
+                                        <svg className="w-3.5 h-3.5 text-gray-200 hover:text-[#1877F2] transition-colors" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                                        {/* LinkedIn */}
+                                        <svg className="w-3.5 h-3.5 text-gray-200 hover:text-[#0A66C2] transition-colors" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                                        {/* Globe */}
+                                        <svg className="w-3.5 h-3.5 text-gray-200 hover:text-remix-500 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                        <span className="text-[9px] text-gray-300 font-medium">{t('scanner.andMore')}</span>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </>
@@ -1434,14 +1543,6 @@ const SidePanel = () => {
                                                 {item.template_name}
                                             </span>
                                             <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                                                {item.tokens_used && (
-                                                    <>
-                                                        <span className="bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-md font-medium">
-                                                            {item.tokens_used} {t('history.tokensSuffix')}
-                                                        </span>
-                                                        <span>•</span>
-                                                    </>
-                                                )}
                                                 {new Date(item.created_at).toLocaleDateString()}
                                             </span>
                                         </div>
@@ -1571,13 +1672,7 @@ const SidePanel = () => {
 
                                 <div>
                                     <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3">{t('account.statsTitle')}</h4>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div className="bg-gray-50 border border-gray-100 p-3 rounded-xl">
-                                            <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">{t('account.totalTokens')}</div>
-                                            <div className="text-lg font-bold text-gray-900">
-                                                {history.reduce((acc, curr) => acc + (curr.tokens_used || 0), 0).toLocaleString()}
-                                            </div>
-                                        </div>
+                                    <div className="grid grid-cols-1 gap-3">
                                         <div className="bg-gray-50 border border-gray-100 p-3 rounded-xl">
                                             <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">{t('account.generations')}</div>
                                             <div className="text-lg font-bold text-gray-900">{history.length}</div>

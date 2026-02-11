@@ -4,7 +4,11 @@
       "Bash(curl:*)",
       "Bash(ls:*)",
       "Bash(node /Users/pierre-yvessage/Dev/autoradio_extension/generate-icons.cjs:*)",
-      "Bash(node resize-red-icons.cjs:*)"
+      "Bash(node resize-red-icons.cjs:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite build:*)",
+      "Bash(git rm:*)",
+      "Bash(npm run build:landing)"
     ]
   }
 }

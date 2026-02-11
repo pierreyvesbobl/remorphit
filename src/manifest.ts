@@ -2,17 +2,25 @@ import { defineManifest } from '@crxjs/vite-plugin'
 
 export default defineManifest({
     manifest_version: 3,
-    name: 'ReMixIt',
+    name: 'ReMorphIt',
     version: '1.0.0',
-    description: 'Transformez le web en contenu prêt à l\'emploi avec ReMixIt',
-    permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'contextMenus', 'tabs'],
-    host_permissions: ['<all_urls>'],
+    description: 'Turn any social media content into ready-to-publish posts written in your voice.',
+    permissions: ['sidePanel', 'storage', 'activeTab', 'contextMenus', 'tabs', 'identity'],
+    host_permissions: [
+        '*://*.youtube.com/*',
+        '*://*.youtu.be/*',
+        '*://*.twitter.com/*',
+        '*://*.x.com/*',
+        '*://*.linkedin.com/*',
+        '*://*.instagram.com/*',
+        '*://*.facebook.com/*',
+    ],
     background: {
         service_worker: 'src/background/index.ts',
         type: 'module',
     },
     action: {
-        default_title: 'Ouvrir ReMixIt',
+        default_title: 'Ouvrir ReMorphIt',
         default_icon: {
             '16': 'public/icon16.png',
             '32': 'public/icon32.png',
@@ -33,14 +41,30 @@ export default defineManifest({
 
     content_scripts: [
         {
-            matches: ['<all_urls>'],
+            matches: [
+                '*://*.youtube.com/*',
+                '*://*.youtu.be/*',
+                '*://*.twitter.com/*',
+                '*://*.x.com/*',
+                '*://*.linkedin.com/*',
+                '*://*.instagram.com/*',
+                '*://*.facebook.com/*',
+            ],
             js: ['src/content/index.ts'],
         },
     ],
     web_accessible_resources: [
         {
             resources: ['WhiteIcon512.png', 'public/WhiteIcon512.png'],
-            matches: ['<all_urls>'],
+            matches: [
+                '*://*.youtube.com/*',
+                '*://*.youtu.be/*',
+                '*://*.twitter.com/*',
+                '*://*.x.com/*',
+                '*://*.linkedin.com/*',
+                '*://*.instagram.com/*',
+                '*://*.facebook.com/*',
+            ],
         },
     ],
 })

@@ -1,6 +1,6 @@
-# 📻 ReMixIt Extension
+# 📻 ReMorphIt Extension
 
-ReMixIt est une extension Chrome premium qui transforme le web en contenu prêt à l'emploi.
+ReMorphIt est une extension Chrome premium qui transforme le web en contenu prêt à l'emploi.
 
 ## Fonctionnalités
 - **Scan intelligent** : Extraction automatique de contenu (Articles, LinkedIn, Twitter/X, YouTube).

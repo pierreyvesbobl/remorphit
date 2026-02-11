@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const Options = () => {
-    const [webhookUrl, setWebhookUrl] = useState('https://n8n.srv987244.hstgr.cloud/webhook/74fa2e22-66bf-4f7d-8f2c-18c4f8d550b0');
+    const [webhookUrl, setWebhookUrl] = useState('');
     const [status, setStatus] = useState('');
 
     useEffect(() => {
@@ -21,7 +21,7 @@ const Options = () => {
 
     return (
         <div className="p-8 max-w-2xl mx-auto">
-            <h1 className="text-2xl font-bold mb-4">Configuration ReMixIt</h1>
+            <h1 className="text-2xl font-bold mb-4">Configuration ReMorphIt</h1>
 
             <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
