@@ -1,0 +1,12 @@
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" fill="#4F46E5"/>
+  <text x="16" y="4" font-family="Inter, sans-serif" font-weight="900" font-size="4" fill="white" text-anchor="middle" writing-mode="tb">
+    <tspan x="16" dy="4">R</tspan>
+    <tspan x="16" dy="4">e</tspan>
+    <tspan x="16" dy="4">M</tspan>
+    <tspan x="16" dy="4">i</tspan>
+    <tspan x="16" dy="4">x</tspan>
+    <tspan x="16" dy="4">I</tspan>
+    <tspan x="16" dy="4">t</tspan>
+  </text>
+</svg>
