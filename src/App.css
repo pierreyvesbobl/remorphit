@@ -18,6 +18,20 @@
   }
 }
 
+@keyframes scan-sweep {
+  0% {
+    top: -20%;
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    top: 120%;
+    opacity: 0;
+  }
+}
+
 .animate-fade-in-up {
   animation: fade-in-up 0.7s ease-out both;
 }
@@ -31,3 +45,25 @@
 .delay-300 { animation-delay: 0.3s; }
 .delay-400 { animation-delay: 0.4s; }
 .delay-500 { animation-delay: 0.5s; }
+
+/* Blinking cursor for transcription */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 0.8s step-end infinite;
+}
+
+/* Remorph button click ripple */
+@keyframes click-ripple {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}

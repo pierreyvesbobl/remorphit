@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { signInWithGoogleViaExtension } from '../lib/googleAuth';
 import { translations, type Language } from '../lib/i18n';
+import { type PlanType, PLAN_LIMITS, WEBSITE_URL, TRIAL_DURATION_DAYS, isTrialExpired } from '../lib/plans';
 import '../index.css';
 
 interface ArticleData {
@@ -67,9 +68,10 @@ const SidePanel = () => {
     const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
     const [showTemplateSelector, setShowTemplateSelector] = useState(false);
 
-    const [userPlan, setUserPlan] = useState<'free' | 'pro'>('free');
+    const [userPlan, setUserPlan] = useState<PlanType>('trial');
+    const [trialExpired, setTrialExpired] = useState(false);
+    const [profileCreatedAt, setProfileCreatedAt] = useState<string | null>(null);
     const [showUpgradeModal, setShowUpgradeModal] = useState(false);
-    const [isProcessingPayment, setIsProcessingPayment] = useState(false);
     const [lang, setLang] = useState<Language>('en');
     const [showShareMenu, setShowShareMenu] = useState(false);
 
@@ -93,6 +95,9 @@ const SidePanel = () => {
         chrome.storage.local.set({ language: newLang });
     };
 
+    const userTemplatesCount = templates.filter(t => !t.is_public && t.user_id === user?.id).length;
+    const canCreateTemplate = userTemplatesCount < PLAN_LIMITS[userPlan].customTemplates;
+
     const t = (path: string) => {
         const keys = path.split('.');
         let current: any = translations[lang];
@@ -110,13 +115,11 @@ const SidePanel = () => {
         try {
             const { data, error } = await supabase
                 .from('profiles')
-                .select('plan')
+                .select('plan, created_at')
                 .single();
 
             if (error) {
                 if (error.code === 'PGRST116') {
-                    // Profile doesn't exist yet, should be created by trigger
-                    // but we can try to create it here too as fallback
                     const { data: { user } } = await supabase.auth.getUser();
                     if (user) {
                         await supabase.from('profiles').insert({ id: user.id });
@@ -126,7 +129,11 @@ const SidePanel = () => {
                 }
             }
             if (data) {
-                setUserPlan(data.plan);
+                setUserPlan(data.plan || 'trial');
+                setProfileCreatedAt(data.created_at);
+                if (data.plan === 'trial') {
+                    setTrialExpired(isTrialExpired(data.created_at));
+                }
             }
         } catch (err) {
             console.error('Error fetching profile:', err);
@@ -246,8 +253,13 @@ const SidePanel = () => {
     const sendToWebhook = async (templateId: string, prompt: string, templateName: string) => {
         if (!article || !user) return;
 
-        // Check generation limit for free plan
-        if (userPlan === 'free' && history.length >= 5) {
+        // Check generation limit
+        if (userPlan === 'trial' && trialExpired) {
+            setShowUpgradeModal(true);
+            setSending(false);
+            return;
+        }
+        if (history.length >= PLAN_LIMITS[userPlan].transformations) {
             setShowUpgradeModal(true);
             setSending(false);
             return;
@@ -609,33 +621,9 @@ const SidePanel = () => {
             setLoading(false);
         }
     };
-    const handleStripeCheckout = async () => {
-        setIsProcessingPayment(true);
-        setError(null);
-        try {
-            const { data, error: invokeError } = await supabase.functions.invoke('stripe-checkout', {
-                body: {
-                    priceId: 'price_1SrE6K0xqDBVjmEQbkrMkkHO', // Replace with actual Stripe Price ID
-                    returnUrl: window.location.href
-                }
-            });
-
-            if (data?.error) throw new Error(data.error);
-            if (invokeError) throw invokeError;
-
-            if (data?.url) {
-                window.open(data.url, '_blank');
-            } else {
-                throw new Error("Aucune URL de paiement reçue.");
-            }
-        } catch (err: any) {
-            console.error('Stripe error details:', err);
-            const msg = err.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
-            setError(`Erreur Stripe : ${msg}`);
-        } finally {
-            setIsProcessingPayment(false);
-            setShowUpgradeModal(false);
-        }
+    const openPricingPage = () => {
+        window.open(`${WEBSITE_URL}#pricing`, '_blank');
+        setShowUpgradeModal(false);
     };
     const handleDeleteTemplate = async (id: string) => {
         if (!confirm('Voulez-vous vraiment supprimer ce template ?')) return;
@@ -1060,104 +1048,72 @@ const SidePanel = () => {
                                 {/* Modal d'upgrade */}
                                 {showUpgradeModal && (
                                     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-                                        <div className="absolute inset-0 bg-remix-900/60 backdrop-blur-sm" onClick={() => !isProcessingPayment && setShowUpgradeModal(false)}></div>
+                                        <div className="absolute inset-0 bg-remix-900/60 backdrop-blur-sm" onClick={() => setShowUpgradeModal(false)}></div>
                                         <div className="relative bg-white w-full max-w-sm rounded-2xl border border-gray-200 overflow-hidden animate-in zoom-in-95 duration-200">
-                                            {isProcessingPayment ? (
-                                                <div className="p-12 text-center flex flex-col items-center justify-center space-y-6">
-                                                    <div className="relative">
-                                                        <div className="animate-spin rounded-full h-16 w-16 border-4 border-remix-100 border-t-remix-600"></div>
-                                                        <div className="absolute inset-0 flex items-center justify-center">
-                                                            <span className="text-xl">💳</span>
-                                                        </div>
-                                                    </div>
-                                                    <div>
-                                                        <h3 className="text-lg font-bold text-gray-900">{t('upgrade.processing')}</h3>
-                                                        <p className="text-gray-500 text-sm mt-1">{t('upgrade.stripeLink')}</p>
-                                                    </div>
-                                                    <div className="w-full bg-gray-50 p-3 rounded-lg flex items-center gap-3">
-                                                        <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
-                                                            <div className="h-full bg-remix-600 animate-pulse w-2/3 transition-all duration-1000"></div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <>
-                                                    <div className="bg-remix-600 p-6 text-white text-center">
-                                                        <span className="text-4xl mb-4 block">🏆</span>
-                                                        <h3 className="text-xl font-bold mb-2">{t('upgrade.modalTitle')}</h3>
-                                                        <p className="text-remix-100 text-sm">{t('upgrade.modalDesc')}</p>
-                                                    </div>
-                                                    <div className="p-6 space-y-4">
-                                                        <ul className="space-y-3">
-                                                            <li className="flex items-center gap-3 text-sm text-gray-600">
-                                                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                {t('upgrade.unlimited')}
-                                                            </li>
-                                                            <li className="flex items-center gap-3 text-sm text-gray-600">
-                                                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                {t('upgrade.premiumTemplates')}
-                                                            </li>
-                                                            <li className="flex items-center gap-3 text-sm text-gray-600">
-                                                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                {t('upgrade.support')}
-                                                            </li>
-                                                            <li className="flex items-center gap-3 text-sm text-gray-600">
-                                                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                {t('upgrade.customTemplates')}
-                                                            </li>
-                                                        </ul>
-                                                        <button
-                                                            onClick={handleStripeCheckout}
-                                                            className="w-full bg-remix-600 text-white py-3 rounded-xl font-bold hover:bg-remix-700 transition  mt-2 flex items-center justify-center gap-2"
-                                                        >
-                                                            <span>💳</span> {t('upgrade.activate')}
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setShowUpgradeModal(false)}
-                                                            className="w-full text-gray-400 text-xs font-semibold hover:text-gray-600 transition"
-                                                        >
-                                                            {t('upgrade.later')}
-                                                        </button>
-                                                    </div>
-                                                </>
-                                            )}
+                                            <div className="bg-remix-600 p-6 text-white text-center">
+                                                <span className="text-4xl mb-3 block">🚀</span>
+                                                <h3 className="text-lg font-bold mb-1">{t('upgrade.modalTitle')}</h3>
+                                                <p className="text-remix-100 text-xs">
+                                                    {trialExpired ? t('upgrade.trialExpiredDesc') : t('upgrade.modalDesc')}
+                                                </p>
+                                            </div>
+                                            <div className="p-6 space-y-4">
+                                                <button
+                                                    onClick={openPricingPage}
+                                                    className="w-full bg-remix-600 text-white py-3 rounded-xl font-bold hover:bg-remix-700 transition flex items-center justify-center gap-2"
+                                                >
+                                                    {t('upgrade.seePlans')}
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+                                                </button>
+                                                <button
+                                                    onClick={() => setShowUpgradeModal(false)}
+                                                    className="w-full text-gray-400 text-xs font-semibold hover:text-gray-600 transition"
+                                                >
+                                                    {t('upgrade.later')}
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 )}
                                 {/* Barre d'utilisation */}
-                                {userPlan === 'free' && (
-                                    <div className="mb-4 bg-white p-3 rounded-xl border border-gray-100 ">
-                                        <div className="flex justify-between items-center mb-1.5">
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('templates.freeUsage')}</span>
+                                <div className="mb-4 bg-white p-3 rounded-xl border border-gray-100">
+                                    <div className="flex justify-between items-center mb-1.5">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('templates.usage')}</span>
+                                            {userPlan === 'trial' && (
+                                                <span className="text-[9px] bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded font-bold">
+                                                    {trialExpired ? t('account.trialExpiredLabel') : t('account.trialDaysLeft').replace('{days}', String(Math.max(0, TRIAL_DURATION_DAYS - Math.floor((Date.now() - new Date(profileCreatedAt || '').getTime()) / (24 * 60 * 60 * 1000)))))}
+                                                </span>
+                                            )}
+                                            {userPlan !== 'pro' && (
                                                 <button
                                                     onClick={() => setShowUpgradeModal(true)}
                                                     className="text-[9px] bg-remix-50 text-remix-600 px-1.5 py-0.5 rounded font-bold hover:bg-remix-600 hover:text-white transition"
                                                 >
                                                     {t('templates.upgrade')}
                                                 </button>
-                                            </div>
-                                            <span className="text-[10px] font-bold text-remix-600">{history.length}/5</span>
+                                            )}
                                         </div>
-                                        <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
-                                            <div
-                                                className={`h-full transition-all duration-500 ${history.length >= 5 ? 'bg-red-500' : 'bg-remix-600'}`}
-                                                style={{ width: `${Math.min((history.length / 5) * 100, 100)}%` }}
-                                            ></div>
-                                        </div>
-                                        {history.length >= 5 && (
-                                            <p className="text-[10px] text-red-500 mt-1.5 font-medium flex items-center gap-1">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                                                {t('templates.limitReached')}
-                                            </p>
-                                        )}
+                                        <span className="text-[10px] font-bold text-remix-600">{history.length}/{PLAN_LIMITS[userPlan].transformations}</span>
                                     </div>
-                                )}
+                                    <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                                        <div
+                                            className={`h-full transition-all duration-500 ${history.length >= PLAN_LIMITS[userPlan].transformations ? 'bg-red-500' : 'bg-remix-600'}`}
+                                            style={{ width: `${Math.min((history.length / PLAN_LIMITS[userPlan].transformations) * 100, 100)}%` }}
+                                        ></div>
+                                    </div>
+                                    {(trialExpired || history.length >= PLAN_LIMITS[userPlan].transformations) && (
+                                        <p className="text-[10px] text-red-500 mt-1.5 font-medium flex items-center gap-1">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                                            {trialExpired ? t('templates.trialExpired') : t('templates.limitReached')}
+                                        </p>
+                                    )}
+                                </div>
 
                                 <div className="bg-white p-4 rounded-lg  border border-gray-100 mb-6 relative overflow-hidden group">
-                                    {userPlan === 'pro' && (
+                                    {userPlan !== 'trial' && (
                                         <div className="absolute top-0 right-0">
-                                            <div className="bg-remix-600 text-[8px] font-bold text-white px-3 py-1 rotate-45 translate-x-4 -translate-y-1  uppercase tracking-tighter">PRO</div>
+                                            <div className="bg-remix-600 text-[8px] font-bold text-white px-3 py-1 rotate-45 translate-x-4 -translate-y-1  uppercase tracking-tighter">{userPlan === 'pro' ? t('templates.proBadge') : t('templates.starterBadge')}</div>
                                         </div>
                                     )}
                                     <h2 className="font-semibold text-gray-900 leading-tight mb-2">
@@ -1257,7 +1213,7 @@ const SidePanel = () => {
                                                         <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('templates.chooseTemplate')}</span>
                                                         <button
                                                             onClick={() => {
-                                                                if (userPlan === 'free') {
+                                                                if (!canCreateTemplate) {
                                                                     setShowUpgradeModal(true);
                                                                 } else {
                                                                     setIsCreatingTemplate(true);
@@ -1266,7 +1222,7 @@ const SidePanel = () => {
                                                             }}
                                                             className="text-[10px] font-bold text-remix-600 hover:text-remix-800 flex items-center gap-1"
                                                         >
-                                                            {userPlan === 'free' && <span>🔒</span>}
+                                                            {!canCreateTemplate && <span>🔒</span>}
                                                             {t('templates.new')}
                                                         </button>
                                                     </div>
@@ -1293,7 +1249,7 @@ const SidePanel = () => {
                                                                         <button
                                                                             onClick={(e) => {
                                                                                 e.stopPropagation();
-                                                                                if (userPlan === 'free') {
+                                                                                if (!canCreateTemplate) {
                                                                                     setShowUpgradeModal(true);
                                                                                 } else {
                                                                                     setIsCreatingTemplate(true);
@@ -1342,29 +1298,21 @@ const SidePanel = () => {
                                                                             <button
                                                                                 onClick={(e) => {
                                                                                     e.stopPropagation();
-                                                                                    if (userPlan === 'free') {
-                                                                                        setShowUpgradeModal(true);
-                                                                                    } else {
-                                                                                        setEditingTemplate(templateitem);
-                                                                                        setNewTemplateName(templateitem.name);
-                                                                                        setNewTemplateDesc(templateitem.description || '');
-                                                                                        setNewTemplatePrompt(templateitem.prompt);
-                                                                                    }
+                                                                                    setEditingTemplate(templateitem);
+                                                                                    setNewTemplateName(templateitem.name);
+                                                                                    setNewTemplateDesc(templateitem.description || '');
+                                                                                    setNewTemplatePrompt(templateitem.prompt);
                                                                                     setShowTemplateSelector(false);
                                                                                 }}
                                                                                 className="p-1 text-gray-300 hover:text-remix-600 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                                                title={userPlan === 'free' ? t('templates.proOnly') : t('templates.modify')}
+                                                                                title={t('templates.modify')}
                                                                             >
-                                                                                {userPlan === 'free' ? (
-                                                                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
-                                                                                ) : (
-                                                                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                                                                                )}
+                                                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
                                                                             </button>
                                                                             <button
                                                                                 onClick={(e) => {
                                                                                     e.stopPropagation();
-                                                                                    if (userPlan === 'free') {
+                                                                                    if (!canCreateTemplate) {
                                                                                         setShowUpgradeModal(true);
                                                                                     } else {
                                                                                         setIsCreatingTemplate(true);
@@ -1635,33 +1583,30 @@ const SidePanel = () => {
                             <div className="p-6 space-y-6">
                                 <div>
                                     <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3">{t('account.currentPlan')}</h4>
-                                    <div className={`flex items-center justify-between p-4 rounded-xl border ${userPlan === 'pro' ? 'bg-remix-50 border-remix-200' : 'bg-gray-50 border-gray-200'}`}>
+                                    <div className={`flex items-center justify-between p-4 rounded-xl border ${userPlan === 'pro' ? 'bg-remix-50 border-remix-200' : userPlan === 'starter' ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200'}`}>
                                         <div className="flex items-center gap-3">
-                                            <div className={`h-10 w-10 rounded-lg flex items-center justify-center text-xl ${userPlan === 'pro' ? 'bg-remix-600 text-white' : 'bg-gray-200 text-gray-500'}`}>
-                                                {userPlan === 'pro' ? '✨' : '🌱'}
+                                            <div className={`h-10 w-10 rounded-lg flex items-center justify-center text-xl ${userPlan === 'pro' ? 'bg-remix-600 text-white' : userPlan === 'starter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
+                                                {userPlan === 'pro' ? '🚀' : userPlan === 'starter' ? '💡' : '🎁'}
                                             </div>
                                             <div>
-                                                <div className="font-bold text-gray-900 capitalize">{userPlan === 'pro' ? t('account.proPlan') : t('account.freePlan')}</div>
+                                                <div className="font-bold text-gray-900 capitalize">
+                                                    {userPlan === 'pro' ? t('account.proPlan') : userPlan === 'starter' ? t('account.starterPlan') : t('account.trialPlan')}
+                                                </div>
                                                 <div className="text-xs text-gray-500">
-                                                    {userPlan === 'pro' ? t('account.unlimited') : t('account.generationsUsed').replace('{count}', history.length.toString())}
+                                                    {t('account.generationsUsed').replace('{count}', history.length.toString()).replace('{limit}', PLAN_LIMITS[userPlan].transformations.toString())}
                                                 </div>
                                             </div>
                                         </div>
-                                        {userPlan !== 'pro' ? (
+                                        {userPlan === 'trial' ? (
                                             <button
                                                 onClick={() => setShowUpgradeModal(true)}
-                                                className="bg-remix-600 text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-remix-700 transition "
+                                                className="bg-remix-600 text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-remix-700 transition"
                                             >
                                                 {t('account.upgrade')}
                                             </button>
                                         ) : (
                                             <button
-                                                onClick={async () => {
-                                                    const { data } = await supabase.functions.invoke('stripe-portal', {
-                                                        body: { returnUrl: window.location.href }
-                                                    });
-                                                    if (data?.url) window.open(data.url, '_blank');
-                                                }}
+                                                onClick={openPricingPage}
                                                 className="bg-white text-remix-600 border border-remix-200 px-4 py-2 rounded-lg text-xs font-bold hover:bg-remix-50 transition"
                                             >
                                                 {t('account.manage')}

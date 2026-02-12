@@ -1,5 +1,8 @@
 // Background script
 
+// Open side panel when clicking the extension icon in toolbar
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
         id: 'remorphit-main',
