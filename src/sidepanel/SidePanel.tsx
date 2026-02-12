@@ -410,6 +410,17 @@ const SidePanel = () => {
         };
     }, [extractContent]);
 
+    // Refresh profile when extension becomes visible (e.g. after Stripe payment)
+    useEffect(() => {
+        const handleVisibility = () => {
+            if (document.visibilityState === 'visible' && user) {
+                fetchProfile();
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibility);
+        return () => document.removeEventListener('visibilitychange', handleVisibility);
+    }, [user]);
+
     // Ultra-reliable tab change detection
     const lastUrlRef = useRef<string>('');
     const lastPostIdRef = useRef<string>('');
@@ -622,8 +633,22 @@ const SidePanel = () => {
         }
     };
     const openPricingPage = () => {
-        chrome.tabs.create({ url: `${WEBSITE_URL}#pricing` });
+        const params = new URLSearchParams();
+        if (user?.email) params.set('email', user.email);
+        if (user?.id) params.set('uid', user.id);
+        const qs = params.toString();
+        chrome.tabs.create({ url: `${WEBSITE_URL}${qs ? `?${qs}` : ''}#pricing` });
         setShowUpgradeModal(false);
+    };
+    const openCustomerPortal = async () => {
+        try {
+            const { data, error } = await supabase.functions.invoke('create-portal-session');
+            if (error) throw error;
+            if (data?.url) chrome.tabs.create({ url: data.url });
+        } catch (err) {
+            console.error('Portal session error:', err);
+            openPricingPage();
+        }
     };
     const handleDeleteTemplate = async (id: string) => {
         if (!confirm('Voulez-vous vraiment supprimer ce template ?')) return;
@@ -1606,7 +1631,7 @@ const SidePanel = () => {
                                             </button>
                                         ) : (
                                             <button
-                                                onClick={openPricingPage}
+                                                onClick={openCustomerPortal}
                                                 className="bg-white text-remix-600 border border-remix-200 px-4 py-2 rounded-lg text-xs font-bold hover:bg-remix-50 transition"
                                             >
                                                 {t('account.manage')}
