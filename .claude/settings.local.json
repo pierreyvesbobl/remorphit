@@ -12,7 +12,11 @@
       "Bash(npm install:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit — ReMorphIt landing page\n\nExtracted from the main extension repo as a standalone static site.\nReact 19 + Tailwind CSS 4 + Vite 7.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit — ReMorphIt landing page\n\nExtracted from the main extension repo as a standalone static site.\nReact 19 + Tailwind CSS 4 + Vite 7.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(npx supabase:*)",
+      "Bash(brew install:*)",
+      "Bash(supabase:*)",
+      "Bash(# Use the postgrest API with the service role key to run SQL via rpc # Or better - use the Management API directly # The supabase CLI stores the token internally, let''s find it grep -r \"\"access\"\" ~/Library/Preferences/)"
     ]
   }
 }
