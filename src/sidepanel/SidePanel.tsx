@@ -622,7 +622,7 @@ const SidePanel = () => {
         }
     };
     const openPricingPage = () => {
-        window.open(`${WEBSITE_URL}#pricing`, '_blank');
+        chrome.tabs.create({ url: `${WEBSITE_URL}#pricing` });
         setShowUpgradeModal(false);
     };
     const handleDeleteTemplate = async (id: string) => {
