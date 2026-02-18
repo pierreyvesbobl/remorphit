@@ -104,6 +104,7 @@ const extractors = {
                 excerpt: description.substring(0, 100),
                 siteName: 'YouTube',
                 url: currentUrl,
+                author: channel || undefined,
                 postId: videoId || currentUrl,
                 hasVideo: true,
                 images: images.length > 0 ? images : undefined,
@@ -161,6 +162,7 @@ const extractors = {
             excerpt: description.substring(0, 100),
             siteName: 'YouTube',
             url: currentUrl,
+            author: channel || undefined,
             postId: videoId || currentUrl,
             hasVideo: true,
             images: images.length > 0 ? images : undefined,
@@ -250,6 +252,10 @@ const extractors = {
             const title = getMeta('og:title') || document.title;
             const description = getMeta('og:description') || '';
 
+            // Try to extract author from og:title — format: "Author (@handle) on X"
+            const ogAuthorMatch = (title || '').match(/^(.+?)\s*\(/);
+            const author = ogAuthorMatch ? ogAuthorMatch[1].trim() : undefined;
+
             return {
                 title: title,
                 content: description,
@@ -257,6 +263,7 @@ const extractors = {
                 excerpt: description,
                 siteName: 'X (Twitter)',
                 url: baseStatusUrl,
+                author,
                 hasVideo: hasVideo,
                 images: images.length > 0 ? images : undefined,
                 video: hasVideo ? {
@@ -270,7 +277,10 @@ const extractors = {
         if (!tweet) return null;
 
         const text = getText('[data-testid="tweetText"]', tweet);
-        const user = getText('[data-testid="User-Name"]', tweet);
+        const userRaw = getText('[data-testid="User-Name"]', tweet);
+        // User-Name contains "Display Name@handle" — extract just the display name
+        const user = userRaw;
+        const tweetAuthor = userRaw.split('@')[0].trim() || undefined;
         const time = tweet.querySelector('time')?.getAttribute('datetime');
 
         // Get tweet URL
@@ -339,6 +349,7 @@ const extractors = {
             excerpt: text,
             siteName: 'X (Twitter)',
             url: tweetUrl,
+            author: tweetAuthor,
             hasVideo: hasVideo,
             images: images.length > 0 ? images : undefined,
             video: hasVideo ? {
@@ -456,12 +467,13 @@ const extractors = {
             });
 
             return {
-                title: author ? `Post de ${author} sur LinkedIn` : 'Post LinkedIn',
+                title: author ? `${author}'s LinkedIn Post` : 'LinkedIn Post',
                 content: text,
                 textContent: text,
                 excerpt: text.substring(0, 100),
                 siteName: 'LinkedIn',
                 url: postUrl,
+                author: author || undefined,
                 postId: postUrn, // Attach unique ID
                 hasVideo: hasVideo,
                 images: images.length > 0 ? images : undefined,
@@ -510,8 +522,10 @@ const extractors = {
                 }
             }
 
-            // Get title
+            // Get title and author
             const title = getMeta('og:title') || (isReel ? 'Facebook Reel' : 'Facebook Video');
+            // og:title often contains the author name for Facebook videos
+            const fbVideoAuthor = (getMeta('og:title') || '').split('|')[0].split('-')[0].trim() || undefined;
 
             return {
                 title: title,
@@ -520,6 +534,7 @@ const extractors = {
                 excerpt: text ? text.substring(0, 100) : '(Video)',
                 siteName: 'Facebook',
                 url: window.location.href,
+                author: fbVideoAuthor,
                 hasVideo: hasVideo,
                 video: {
                     url: window.location.href,
@@ -528,6 +543,14 @@ const extractors = {
                 },
             };
         }
+
+        // Expand all "See more" / "En voir plus" buttons before extracting
+        document.querySelectorAll('div[role="button"]').forEach(btn => {
+            const t = (btn as HTMLElement).innerText?.trim().toLowerCase() || '';
+            if (t === 'see more' || t === 'en voir plus' || t === 'voir plus' || t === 'more' || t === 'ver más' || t === 'mehr ansehen') {
+                (btn as HTMLElement).click();
+            }
+        });
 
         // Find posts by looking for div[dir="auto"] with substantial text
         // These are the actual text blocks in Facebook posts
@@ -633,12 +656,13 @@ const extractors = {
         }
 
         return {
-            title: author ? `Post de ${author} sur Facebook` : 'Facebook Post',
+            title: author ? `${author}'s Facebook Post` : 'Facebook Post',
             content: text,
             textContent: text,
             excerpt: text.substring(0, 100),
             siteName: 'Facebook',
             url: window.location.href,
+            author: author || undefined,
             hasVideo: hasVideo,
             images: uniqueImages.length > 0 ? uniqueImages : undefined,
             video: hasVideo ? {
@@ -691,7 +715,7 @@ const extractors = {
             }
 
             const title = author
-                ? `Reel de ${author} sur Instagram`
+                ? `${author}'s Instagram Reel`
                 : 'Instagram Reel';
 
             const images: string[] = [];
@@ -704,6 +728,7 @@ const extractors = {
                 excerpt: caption ? caption.substring(0, 100) : '(Reel)',
                 siteName: 'Instagram',
                 url: currentUrl,
+                author: author || undefined,
                 hasVideo: hasVideo,
                 images: images.length > 0 ? images : undefined,
                 video: hasVideo ? {
@@ -848,8 +873,8 @@ const extractors = {
         }
 
         const title = author
-            ? `Post de ${author} sur Instagram`
-            : 'Post Instagram';
+            ? `${author}'s Instagram Post`
+            : 'Instagram Post';
 
         return {
             title,
@@ -858,6 +883,7 @@ const extractors = {
             excerpt: caption.substring(0, 100),
             siteName: 'Instagram',
             url: postUrl,
+            author: author || undefined,
             hasVideo: hasVideo,
             images: images.length > 0 ? images : undefined,
             video: hasVideo ? {
@@ -945,6 +971,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         videoData.thumbnail = ogImage;
                     }
 
+                    // Author: try multiple meta sources
+                    const articleAuthor = getMeta('author')
+                        || getMeta('article:author')
+                        || getMeta('twitter:creator')
+                        || (document.querySelector('meta[name="author"]') as HTMLMetaElement)?.content
+                        || (article as any).byline
+                        || undefined;
+
                     // Site name: try multiple sources
                     const siteName = article.siteName
                         || getMeta('og:site_name')
@@ -959,6 +993,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                         excerpt: article.excerpt,
                         siteName: siteName,
                         url: window.location.href,
+                        author: articleAuthor || undefined,
                         hasVideo: !!videoData.url,
                         video: videoData.url ? videoData : undefined,
                         images: images.length > 0 ? images : undefined,
@@ -997,7 +1032,7 @@ const createToggleButton = () => {
         <img src="${iconUrl}" alt="ReMorphIt" style="width: 24px; height: 24px; object-fit: contain;" />
     `;
 
-    btn.title = 'Ouvrir ReMorphIt';
+    btn.title = 'Open ReMorphIt';
 
     // Apply basic inline styles just in case css fails to load or for specificity
     btn.style.position = 'fixed';
@@ -1030,7 +1065,6 @@ const createToggleButton = () => {
 
     btn.addEventListener('click', () => {
         chrome.runtime.sendMessage({ action: 'OPEN_SIDE_PANEL' });
-        // Don't hide the button - let it stay visible
     });
 
     document.body.appendChild(btn);

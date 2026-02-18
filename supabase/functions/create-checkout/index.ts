@@ -2,7 +2,7 @@ import Stripe from 'https://esm.sh/stripe@14.14.0?target=deno';
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!, { apiVersion: '2024-04-10' });
 
-const WEBSITE_URL = Deno.env.get('WEBSITE_URL') || 'https://remorphit.com';
+const WEBSITE_URL = Deno.env.get('WEBSITE_URL') || 'https://remorph.it';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

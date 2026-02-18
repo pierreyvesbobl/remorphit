@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { signInWithGoogleViaExtension } from '../lib/googleAuth';
-import { translations, type Language } from '../lib/i18n';
-import { type PlanType, PLAN_LIMITS, WEBSITE_URL, TRIAL_DURATION_DAYS, isTrialExpired } from '../lib/plans';
+import { translations, GENERATION_LANGUAGES } from '../lib/i18n';
+import { type PlanType, PLAN_LIMITS, TRIAL_DURATION_DAYS, isTrialExpired } from '../lib/plans';
 import '../index.css';
 
 interface ArticleData {
@@ -12,6 +12,7 @@ interface ArticleData {
     excerpt: string;
     siteName: string;
     url: string;
+    author?: string;
     postId?: string;
     hasVideo?: boolean;
     video?: {
@@ -45,7 +46,9 @@ const SidePanel = () => {
     const [article, setArticle] = useState<ArticleData | null>(null);
     const [templates, setTemplates] = useState<Template[]>([]);
     const [loading, setLoading] = useState(false);
-    const [sending, setSending] = useState(false);
+    const [sendingCount, setSendingCount] = useState(0);
+    const [articleFlyOut, setArticleFlyOut] = useState(false);
+    const [remorphCooldown, setRemorphCooldown] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
     const [generatedContent, setGeneratedContent] = useState<any>(null);
@@ -72,13 +75,28 @@ const SidePanel = () => {
     const [trialExpired, setTrialExpired] = useState(false);
     const [profileCreatedAt, setProfileCreatedAt] = useState<string | null>(null);
     const [showUpgradeModal, setShowUpgradeModal] = useState(false);
-    const [lang, setLang] = useState<Language>('en');
+    const [generationLang, setGenerationLang] = useState('auto');
     const [showShareMenu, setShowShareMenu] = useState(false);
 
+    // Edit & Chat states
+    const [isEditing, setIsEditing] = useState(false);
+    const [editedContent, setEditedContent] = useState('');
+    const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+    const [chatInput, setChatInput] = useState('');
+    const [chatLoading, setChatLoading] = useState(false);
+    const chatEndRef = useRef<HTMLDivElement>(null);
+
+    const [contentUpdated, setContentUpdated] = useState(false);
+    const [newHistoryIds, setNewHistoryIds] = useState<Set<string>>(new Set());
+
+    // Pricing states
+    const [billingPeriod, setBillingPeriod] = useState<'monthly' | 'yearly'>('monthly');
+    const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
+
     useEffect(() => {
-        chrome.storage.local.get(['language'], (result) => {
-            if (result.language) {
-                setLang(result.language as Language);
+        chrome.storage.local.get(['generationLanguage'], (result) => {
+            if (result.generationLanguage) {
+                setGenerationLang(result.generationLanguage as string);
             }
         });
     }, []);
@@ -90,9 +108,9 @@ const SidePanel = () => {
         }
     }, [user, showUpgradeModal]);
 
-    const toggleLanguage = (newLang: Language) => {
-        setLang(newLang);
-        chrome.storage.local.set({ language: newLang });
+    const changeGenerationLang = (code: string) => {
+        setGenerationLang(code);
+        chrome.storage.local.set({ generationLanguage: code });
     };
 
     const userTemplatesCount = templates.filter(t => !t.is_public && t.user_id === user?.id).length;
@@ -100,7 +118,7 @@ const SidePanel = () => {
 
     const t = (path: string) => {
         const keys = path.split('.');
-        let current: any = translations[lang];
+        let current: any = translations;
         for (const key of keys) {
             if (current && current[key]) {
                 current = current[key];
@@ -113,26 +131,28 @@ const SidePanel = () => {
 
     const fetchProfile = async () => {
         try {
+            const { data: { user: authUser } } = await supabase.auth.getUser();
             const { data, error } = await supabase
                 .from('profiles')
-                .select('plan, created_at')
+                .select('plan')
                 .single();
 
             if (error) {
                 if (error.code === 'PGRST116') {
-                    const { data: { user } } = await supabase.auth.getUser();
-                    if (user) {
-                        await supabase.from('profiles').insert({ id: user.id });
+                    if (authUser) {
+                        await supabase.from('profiles').insert({ id: authUser.id });
                     }
                 } else {
                     throw error;
                 }
             }
             if (data) {
-                setUserPlan(data.plan || 'trial');
-                setProfileCreatedAt(data.created_at);
-                if (data.plan === 'trial') {
-                    setTrialExpired(isTrialExpired(data.created_at));
+                const plan = data.plan === 'free' ? 'trial' : (data.plan || 'trial');
+                setUserPlan(plan);
+                const createdAt = authUser?.created_at || null;
+                setProfileCreatedAt(createdAt);
+                if (plan === 'trial') {
+                    setTrialExpired(isTrialExpired(createdAt));
                 }
             }
         } catch (err) {
@@ -149,7 +169,11 @@ const SidePanel = () => {
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
-            setHistory(data || []);
+            // Preserve pending items while merging fresh DB data
+            setHistory(prev => {
+                const pendingItems = prev.filter(h => h.id.startsWith('pending-'));
+                return [...pendingItems, ...(data || [])];
+            });
         } catch (err) {
             console.error('Error fetching history:', err);
         } finally {
@@ -170,9 +194,11 @@ const SidePanel = () => {
             const fetchedTemplates = data || [];
             setTemplates(fetchedTemplates);
 
-            // Set first template as default if none selected
+            // Restore last used template, or default to first
             if (fetchedTemplates.length > 0 && !selectedTemplate) {
-                setSelectedTemplate(fetchedTemplates[0]);
+                const lastId = localStorage.getItem('remorphit_last_template');
+                const last = lastId ? fetchedTemplates.find(t => t.id === lastId) : null;
+                setSelectedTemplate(last || fetchedTemplates[0]);
             }
         } catch (err) {
             console.error('Error fetching templates:', err);
@@ -236,139 +262,241 @@ const SidePanel = () => {
                 }
             }
         } catch (err) {
-            console.error('Extraction error caught:', err);
             const errorMessage = (err as Error).message;
 
             if (errorMessage.includes("Receiving end does not exist") || errorMessage.includes("Could not establish connection")) {
-                setError("Extension non active sur cette page. Veuillez recharger la page web.");
+                // Content script not loaded — try to inject it and retry once
+                try {
+                    let targetId = tabId;
+                    if (!targetId) {
+                        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                        targetId = tab?.id;
+                    }
+                    if (targetId) {
+                        await chrome.scripting.executeScript({
+                            target: { tabId: targetId },
+                            files: ['src/content/index.ts'],
+                        });
+                        // Wait briefly for the script to initialize
+                        await new Promise(r => setTimeout(r, 300));
+                        const retryResponse = await chrome.tabs.sendMessage(targetId, { action: 'EXTRACT_CONTENT' });
+                        if (retryResponse && retryResponse.success) {
+                            lastPostIdRef.current = retryResponse.data.postId || '';
+                            setArticle(retryResponse.data);
+                            setLoading(false);
+                            return;
+                        }
+                    }
+                } catch {
+                    // Injection failed — show error
+                }
+                setError(t('messages.extensionNotActive'));
                 setArticle(null);
             } else {
-                setError(errorMessage || "Impossible d'extraire le contenu.");
+                setError(errorMessage || t('messages.failedExtract'));
             }
         } finally {
             setLoading(false);
         }
     }, []);
 
-    const sendToWebhook = async (templateId: string, prompt: string, templateName: string) => {
+    const sendToWebhook = (templateId: string, prompt: string, templateName: string) => {
         if (!article || !user) return;
 
         // Check generation limit
         if (userPlan === 'trial' && trialExpired) {
             setShowUpgradeModal(true);
-            setSending(false);
             return;
         }
         if (history.length >= PLAN_LIMITS[userPlan].transformations) {
             setShowUpgradeModal(true);
-            setSending(false);
             return;
         }
 
-        setSending(true);
+        // Capture current article for background processing
+        const currentArticle = { ...article };
+        const currentUser = user;
+
+        setSendingCount(c => c + 1);
         setSuccessMessage(null);
         setError(null);
 
-        try {
-            // Get configured webhook URL
-            const result = await chrome.storage.sync.get(['n8nWebhookUrl']);
-            let webhookUrl = result.n8nWebhookUrl;
+        // Add pending item to history
+        const pendingId = `pending-${Date.now()}`;
+        const pendingItem: HistoryItem = {
+            id: pendingId,
+            title: currentArticle.title || 'Generating...',
+            content: '',
+            template_name: templateName,
+            url: currentArticle.url,
+            created_at: new Date().toISOString(),
+        };
+        setHistory(prev => [pendingItem, ...prev]);
 
-            // Fallback default if not set (User's specific URL)
-            if (!webhookUrl) {
-                webhookUrl = 'https://n8n.srv987244.hstgr.cloud/webhook/74fa2e22-66bf-4f7d-8f2c-18c4f8d550b0';
-            }
+        // Fly-out animation on article card + gray out button
+        setArticleFlyOut(true);
+        setRemorphCooldown(true);
+        setTimeout(() => setArticleFlyOut(false), 900);
+        setTimeout(() => setRemorphCooldown(false), 4000);
 
-            const payload = {
-                ...article,
-                template: {
-                    id: templateId,
-                    prompt: prompt
-                },
-                timestamp: new Date().toISOString()
-            };
-
-            // Send webhook via Background script to avoid CORS
-            const response = await chrome.runtime.sendMessage({
-                action: 'SEND_WEBHOOK',
-                url: webhookUrl,
-                payload: payload
-            });
-
-            if (response && response.success) {
-                // n8n returns an array usually, we take the first item or the object itself
-                let resultData = Array.isArray(response.data) ? response.data[0] : response.data;
-
-                // If the data is wrapped in an 'output' property, unwrap it
-                if (resultData && resultData.output) {
-                    resultData = resultData.output;
+        // Run in background (fire-and-forget, no await)
+        (async () => {
+            try {
+                const result = await chrome.storage.sync.get(['n8nWebhookUrl']);
+                let webhookUrl = result.n8nWebhookUrl;
+                if (!webhookUrl) {
+                    webhookUrl = 'https://n8n.srv987244.hstgr.cloud/webhook/74fa2e22-66bf-4f7d-8f2c-18c4f8d550b0';
                 }
 
-                if (resultData) {
+                const payload = {
+                    ...currentArticle,
+                    template: { id: templateId, prompt },
+                    language: generationLang,
+                    timestamp: new Date().toISOString()
+                };
 
-                    if (resultData.error === true) {
-                        setError(resultData.message || "Erreur lors de la génération.");
-                        setSending(false);
-                        return;
-                    }
+                const response = await chrome.runtime.sendMessage({
+                    action: 'SEND_WEBHOOK',
+                    url: webhookUrl,
+                    payload
+                });
 
-                    // Combine result data with history ID for display
-                    const contentToDisplay = {
-                        title: resultData.title || article.title,
-                        content: resultData.content || '',
-                    };
+                if (response && response.success) {
+                    let resultData = Array.isArray(response.data) ? response.data[0] : response.data;
+                    if (resultData && resultData.output) resultData = resultData.output;
 
-                    setSuccessMessage(resultData.message || "Contenu généré avec succès !");
-
-                    // SAVE TO HISTORY
-                    try {
-                        const { data: histData, error: histError } = await supabase
-                            .from('history')
-                            .insert([{
-                                user_id: user.id,
-                                title: contentToDisplay.title,
-                                content: contentToDisplay.content,
-                                template_name: templateName,
-                                url: article.url,
-                                tokens_used: resultData.totalTokens || 0 // Keep as fallback if provided
-                            }])
-                            .select()
-                            .single();
-
-                        if (histError) throw histError;
-
-                        // Combine history metadata with the actual content
-                        if (histData) {
-                            setGeneratedContent({
-                                id: histData.id,
-                                title: contentToDisplay.title,
-                                content: contentToDisplay.content,
-                                created_at: histData.created_at
-                            });
-                        } else {
-                            // Fallback if no history data returned
-                            setGeneratedContent(contentToDisplay);
+                    if (resultData) {
+                        if (resultData.error === true) {
+                            setError(resultData.message || t('messages.generationError'));
+                            return;
                         }
 
-                        fetchHistory(); // Refresh history
-                    } catch (hErr) {
-                        console.error('Error saving to history:', hErr);
+                        const contentToDisplay = {
+                            title: resultData.title || currentArticle.title,
+                            content: resultData.content || '',
+                        };
+
+                        // Save to DB
+                        try {
+                            const { data: histData, error: histError } = await supabase
+                                .from('history')
+                                .insert([{
+                                    user_id: currentUser.id,
+                                    title: contentToDisplay.title,
+                                    content: contentToDisplay.content,
+                                    template_name: templateName,
+                                    url: currentArticle.url,
+                                    tokens_used: resultData.totalTokens || 0
+                                }])
+                                .select()
+                                .single();
+
+                            if (histError) throw histError;
+
+                            if (histData) {
+                                setGeneratedContent({
+                                    id: histData.id,
+                                    title: contentToDisplay.title,
+                                    content: contentToDisplay.content,
+                                    created_at: histData.created_at
+                                });
+                                // Mark as new for highlight animation
+                                setNewHistoryIds(prev => new Set(prev).add(histData.id));
+                                setTimeout(() => {
+                                    setNewHistoryIds(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(histData.id);
+                                        return next;
+                                    });
+                                }, 3000);
+                            } else {
+                                setGeneratedContent(contentToDisplay);
+                            }
+
+                            fetchHistory();
+                        } catch (hErr) {
+                            console.error('Error saving to history:', hErr);
+                        }
+                    } else {
+                        setError(t('messages.noResponse'));
                     }
-
                 } else {
-                    setError("Envoyé, mais aucune réponse reçue du serveur.");
+                    throw new Error(`Webhook error: ${response.error}`);
                 }
-            } else {
-                throw new Error(`Erreur webhook: ${response.error}`);
+            } catch (err) {
+                console.error(err);
+                setError(t('messages.sendFailed').replace('{error}', (err as Error).message));
+            } finally {
+                setHistory(prev => prev.filter(h => h.id !== pendingId));
+                setSendingCount(c => c - 1);
             }
+        })();
+    };
 
-        } catch (err) {
-            console.error(err);
-            setError(`Échec de l'envoi vers n8n: ${(err as Error).message}`);
-        } finally {
-            setSending(false);
+    const handleSaveEdit = async () => {
+        if (!generatedContent) return;
+        const updated = { ...generatedContent, content: editedContent };
+        setGeneratedContent(updated);
+        setIsEditing(false);
+        // Update in DB if we have an ID
+        if (generatedContent.id) {
+            try {
+                await supabase.from('history').update({ content: editedContent }).eq('id', generatedContent.id);
+                fetchHistory();
+            } catch (err) {
+                console.error('Error saving edit:', err);
+            }
         }
     };
+
+    const handleChatSend = async () => {
+        if (!chatInput.trim() || !generatedContent || chatLoading) return;
+        const instruction = chatInput.trim();
+        setChatInput('');
+        setChatMessages(prev => [...prev, { role: 'user', content: instruction }]);
+        setChatLoading(true);
+
+        try {
+            const { data, error } = await supabase.functions.invoke('chat-refine', {
+                body: {
+                    content: generatedContent.content,
+                    messages: chatMessages,
+                    instruction,
+                },
+            });
+
+            if (error) throw error;
+            if (data?.content) {
+                const updated = { ...generatedContent, content: data.content };
+                setGeneratedContent(updated);
+                setContentUpdated(true);
+                setTimeout(() => setContentUpdated(false), 1500);
+                setChatMessages(prev => [...prev, { role: 'assistant', content: '✓' }]);
+                // Update in DB
+                if (generatedContent.id) {
+                    await supabase.from('history').update({ content: data.content }).eq('id', generatedContent.id);
+                    fetchHistory();
+                }
+            }
+        } catch (err) {
+            console.error('Chat refine error:', err);
+            setChatMessages(prev => [...prev, { role: 'assistant', content: 'Error: could not refine content.' }]);
+        } finally {
+            setChatLoading(false);
+        }
+    };
+
+    // Auto-scroll chat
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [chatMessages]);
+
+    // Reset chat when switching content
+    useEffect(() => {
+        setChatMessages([]);
+        setChatInput('');
+        setIsEditing(false);
+    }, [generatedContent?.id]);
 
     useEffect(() => {
         // Check authentication first
@@ -521,10 +649,32 @@ const SidePanel = () => {
             } else {
                 const { data, error } = await supabase.auth.signUp({ email, password });
                 if (error) throw error;
-                if (data.user) {
-                    setSuccessMessage('Compte créé ! Vérifiez votre email pour confirmer.');
+                // Supabase returns a user with empty identities if email already exists
+                if (data.user && data.user.identities && data.user.identities.length === 0) {
+                    setError(t('auth.alreadyRegistered'));
+                    setIsLogin(true);
+                } else if (data.user) {
+                    setSuccessMessage(t('auth.confirmEmail'));
                 }
             }
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleForgotPassword = async () => {
+        if (!email) {
+            setError(t('auth.email'));
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(email);
+            if (error) throw error;
+            setSuccessMessage(t('auth.resetPasswordSent'));
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -583,7 +733,7 @@ const SidePanel = () => {
             setNewTemplateName('');
             setNewTemplateDesc('');
             setNewTemplatePrompt('');
-            setSuccessMessage('Template créé avec succès !');
+            setSuccessMessage(t('messages.templateCreated'));
         } catch (err) {
             console.error(err);
             setError((err as Error).message);
@@ -624,7 +774,7 @@ const SidePanel = () => {
             setNewTemplateName('');
             setNewTemplateDesc('');
             setNewTemplatePrompt('');
-            setSuccessMessage('Template mis à jour !');
+            setSuccessMessage(t('messages.templateUpdated'));
         } catch (err) {
             console.error(err);
             setError((err as Error).message);
@@ -632,13 +782,36 @@ const SidePanel = () => {
             setLoading(false);
         }
     };
-    const openPricingPage = () => {
-        const params = new URLSearchParams();
-        if (user?.email) params.set('email', user.email);
-        if (user?.id) params.set('uid', user.id);
-        const qs = params.toString();
-        chrome.tabs.create({ url: `${WEBSITE_URL}${qs ? `?${qs}` : ''}#pricing` });
-        setShowUpgradeModal(false);
+    const handleCheckout = async (plan: 'starter' | 'pro') => {
+        const priceIds = {
+            starter: {
+                monthly: import.meta.env.VITE_STRIPE_STARTER_MONTHLY_PRICE_ID,
+                yearly: import.meta.env.VITE_STRIPE_STARTER_YEARLY_PRICE_ID,
+            },
+            pro: {
+                monthly: import.meta.env.VITE_STRIPE_PRO_MONTHLY_PRICE_ID,
+                yearly: import.meta.env.VITE_STRIPE_PRO_YEARLY_PRICE_ID,
+            },
+        };
+        const priceId = priceIds[plan][billingPeriod];
+        if (!priceId || !user) return;
+
+        setCheckoutLoading(plan);
+        try {
+            const { data, error } = await supabase.functions.invoke('create-checkout', {
+                body: { priceId, uid: user.id, email: user.email },
+            });
+            if (error) throw error;
+            if (data?.url) {
+                chrome.tabs.create({ url: data.url });
+                setShowUpgradeModal(false);
+            }
+        } catch (err) {
+            console.error('Checkout error:', err);
+            setError((err as Error).message);
+        } finally {
+            setCheckoutLoading(null);
+        }
     };
     const openCustomerPortal = async () => {
         try {
@@ -647,11 +820,11 @@ const SidePanel = () => {
             if (data?.url) chrome.tabs.create({ url: data.url });
         } catch (err) {
             console.error('Portal session error:', err);
-            openPricingPage();
+            setShowUpgradeModal(true);
         }
     };
     const handleDeleteTemplate = async (id: string) => {
-        if (!confirm('Voulez-vous vraiment supprimer ce template ?')) return;
+        if (!confirm(t('templates.confirmDelete'))) return;
 
         setLoading(true);
         try {
@@ -663,7 +836,7 @@ const SidePanel = () => {
             if (error) throw error;
 
             setTemplates(templates.filter(t => t.id !== id));
-            setSuccessMessage('Template supprimé.');
+            setSuccessMessage(t('messages.templateDeleted'));
             setTimeout(() => setSuccessMessage(null), 3000);
         } catch (err) {
             console.error(err);
@@ -748,6 +921,15 @@ const SidePanel = () => {
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-remix-500 focus:border-transparent outline-none text-sm"
                                 placeholder="••••••••"
                             />
+                            {isLogin && (
+                                <button
+                                    type="button"
+                                    onClick={handleForgotPassword}
+                                    className="mt-1 text-xs text-remix-600 hover:text-remix-800 font-medium"
+                                >
+                                    {t('auth.forgotPassword')}
+                                </button>
+                            )}
                         </div>
 
                         {error && (
@@ -811,129 +993,206 @@ const SidePanel = () => {
 
     if (generatedContent) {
         return (
-            <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+            <div className="h-screen bg-gray-50 flex flex-col font-sans">
                 <header className="px-4 py-3 bg-white border-b border-gray-200 sticky top-0 z-10 flex items-center justify-between">
                     <button
-                        onClick={() => setGeneratedContent(null)}
+                        onClick={() => { setGeneratedContent(null); setIsEditing(false); setChatMessages([]); }}
                         className="text-sm font-medium text-remix-600 hover:text-remix-800 flex items-center gap-1"
                     >
                         ← {t('general.back')}
                     </button>
                     <h1 className="text-sm font-bold text-gray-900 truncate max-w-[150px]">{generatedContent.title || t('tabs.history')}</h1>
-                    {generatedContent.id ? (
-                        <button
-                            onClick={() => handleDeleteHistory(generatedContent.id)}
-                            className="p-1 text-gray-400 hover:text-red-500 transition"
-                            title={t('templates.delete')}
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
-                        </button>
-                    ) : (
-                        <div className="w-8"></div>
-                    )}
-                </header>
-                <main className="flex-1 p-4 overflow-y-auto">
-                    <div className="bg-white rounded-lg  border border-gray-200 overflow-hidden">
-                        {/* We render the HTML content safely */}
-                        <div
-                            className="prose prose-sm max-w-none p-4 whitespace-pre-wrap"
-                            dangerouslySetInnerHTML={{
-                                __html: generatedContent.content
-                                    // Convert plain text to HTML if needed
-                                    .replace(/\n\n/g, '</p><p>')
-                                    .replace(/^(.+)$/, '<p>$1</p>')
-                                    .replace(/<p><\/p>/g, '')
-                            }}
-                        />
+                    <div className="flex items-center gap-1">
+                        {!isEditing && (
+                            <button
+                                onClick={() => { setEditedContent(generatedContent.content); setIsEditing(true); }}
+                                className="p-1.5 text-gray-400 hover:text-remix-600 transition"
+                                title="Edit"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                            </button>
+                        )}
+                        {generatedContent.id && (
+                            <button
+                                onClick={() => handleDeleteHistory(generatedContent.id)}
+                                className="p-1.5 text-gray-400 hover:text-red-500 transition"
+                                title={t('templates.delete')}
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
+                            </button>
+                        )}
                     </div>
-                    <div className="mt-4 flex gap-2 relative">
-                        <button
-                            onClick={() => {
-                                navigator.clipboard.writeText(generatedContent.content);
-                                setSuccessMessage(t('history.copied'));
-                                setTimeout(() => setSuccessMessage(null), 2000);
-                            }}
-                            className="flex-1 bg-white text-remix-600 border border-remix-200 py-2.5 rounded-xl font-bold hover:bg-remix-50 transition  flex items-center justify-center gap-2"
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
-                            {t('general.copyHtml')}
-                        </button>
-                        <button
-                            onClick={() => setShowShareMenu(!showShareMenu)}
-                            className="flex-1 bg-remix-600 text-white py-2.5 rounded-xl font-bold hover:bg-remix-700 transition  flex items-center justify-center gap-2"
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" x2="15.42" y1="13.51" y2="17.49" /><line x1="15.41" x2="8.59" y1="6.51" y2="10.49" /></svg>
-                            {t('general.share')}
-                        </button>
+                </header>
 
-                        {showShareMenu && (
-                            <div className="absolute bottom-full left-0 right-0 mb-2 bg-white rounded-xl border border-gray-200 border border-gray-100 p-2 z-20 animate-in fade-in slide-in-from-bottom-2 duration-200">
-                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-2 py-1 border-b border-gray-50">{t('general.sendTo')}</div>
-                                <div className="grid grid-cols-2 gap-1">
+                <main className="flex-1 overflow-y-auto p-4 pb-2">
+                    {/* Content area */}
+                    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                        {isEditing ? (
+                            <div className="p-3">
+                                <textarea
+                                    value={editedContent}
+                                    onChange={e => setEditedContent(e.target.value)}
+                                    className="w-full min-h-[200px] text-sm text-gray-800 border border-gray-200 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-remix-400 resize-y"
+                                />
+                                <div className="flex gap-2 mt-2">
                                     <button
-                                        onClick={() => {
-                                            const text = generatedContent.content.replace(/<[^>]*>/g, '');
-                                            window.open(`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}`, '_blank');
-                                            setShowShareMenu(false);
-                                        }}
-                                        className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        onClick={handleSaveEdit}
+                                        className="flex-1 bg-remix-600 text-white py-2 rounded-lg text-xs font-bold hover:bg-remix-700 transition"
                                     >
-                                        <span className="text-base text-blue-600">LinkedIn</span>
+                                        {t('general.save')}
                                     </button>
                                     <button
-                                        onClick={() => {
-                                            const text = generatedContent.content.replace(/<[^>]*>/g, '');
-                                            window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`, '_blank');
-                                            setShowShareMenu(false);
-                                        }}
-                                        className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        onClick={() => setIsEditing(false)}
+                                        className="flex-1 bg-gray-100 text-gray-600 py-2 rounded-lg text-xs font-bold hover:bg-gray-200 transition"
                                     >
-                                        <span className="text-base text-gray-900">Twitter (X)</span>
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            const text = generatedContent.content.replace(/<[^>]*>/g, '');
-                                            window.open(`mailto:?subject=${encodeURIComponent(generatedContent.title || 'ReMorphIt Content')}&body=${encodeURIComponent(text)}`, '_blank');
-                                            setShowShareMenu(false);
-                                        }}
-                                        className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
-                                    >
-                                        <span className="text-base text-red-500">Email</span>
-                                    </button>
-                                    <button
-                                        onClick={async () => {
-                                            const text = generatedContent.content.replace(/<[^>]*>/g, '');
-                                            if (navigator.share) {
-                                                try {
-                                                    await navigator.share({
-                                                        title: generatedContent.title || 'ReMorphIt Content',
-                                                        text: text,
-                                                        url: window.location.href
-                                                    });
-                                                } catch (err) {
-                                                    console.error('Error sharing:', err);
-                                                }
-                                            } else {
-                                                navigator.clipboard.writeText(text);
-                                                setSuccessMessage(t('history.copied'));
-                                                setTimeout(() => setSuccessMessage(null), 2000);
-                                            }
-                                            setShowShareMenu(false);
-                                        }}
-                                        className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
-                                    >
-                                        <span className="text-base text-remix-600">{t('general.shareOther')}</span>
+                                        {t('general.cancel')}
                                     </button>
                                 </div>
                             </div>
+                        ) : (
+                            <div
+                                className={`generated-content text-sm text-gray-800 p-4 transition-all duration-700 ${contentUpdated ? 'content-flash' : ''}`}
+                                dangerouslySetInnerHTML={{
+                                    __html: /<[a-z][\s\S]*>/i.test(generatedContent.content)
+                                        ? generatedContent.content
+                                        : generatedContent.content
+                                            .replace(/\n\n/g, '</p><p>')
+                                            .replace(/^(.+)/, '<p>$1</p>')
+                                            .replace(/<p><\/p>/g, '')
+                                }}
+                            />
                         )}
                     </div>
+
+                    {/* Action buttons */}
+                    {!isEditing && (
+                        <div className="mt-3 flex gap-2 relative">
+                            <button
+                                onClick={() => {
+                                    navigator.clipboard.writeText(generatedContent.content);
+                                    setSuccessMessage(t('history.copied'));
+                                    setTimeout(() => setSuccessMessage(null), 2000);
+                                }}
+                                className="flex-1 bg-white text-remix-600 border border-remix-200 py-2 rounded-xl text-xs font-bold hover:bg-remix-50 transition flex items-center justify-center gap-1.5"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
+                                {t('general.copyHtml')}
+                            </button>
+                            <button
+                                onClick={() => setShowShareMenu(!showShareMenu)}
+                                className="flex-1 bg-remix-600 text-white py-2 rounded-xl text-xs font-bold hover:bg-remix-700 transition flex items-center justify-center gap-1.5"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" x2="15.42" y1="13.51" y2="17.49" /><line x1="15.41" x2="8.59" y1="6.51" y2="10.49" /></svg>
+                                {t('general.share')}
+                            </button>
+
+                            {showShareMenu && (
+                                <div className="absolute bottom-full left-0 right-0 mb-2 bg-white rounded-xl border border-gray-100 p-2 z-20 shadow-lg">
+                                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-2 py-1 border-b border-gray-50">{t('general.sendTo')}</div>
+                                    <div className="grid grid-cols-2 gap-1">
+                                        <button
+                                            onClick={() => {
+                                                const text = generatedContent.content.replace(/<[^>]*>/g, '');
+                                                chrome.tabs.create({ url: `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(text)}` });
+                                                setShowShareMenu(false);
+                                            }}
+                                            className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        >
+                                            <span className="text-base text-blue-600">LinkedIn</span>
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                const text = generatedContent.content.replace(/<[^>]*>/g, '');
+                                                chrome.tabs.create({ url: `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}` });
+                                                setShowShareMenu(false);
+                                            }}
+                                            className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        >
+                                            <span className="text-base text-gray-900">Twitter (X)</span>
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                const text = generatedContent.content.replace(/<[^>]*>/g, '');
+                                                chrome.tabs.create({ url: `mailto:?subject=${encodeURIComponent(generatedContent.title || 'ReMorphIt Content')}&body=${encodeURIComponent(text)}` });
+                                                setShowShareMenu(false);
+                                            }}
+                                            className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        >
+                                            <span className="text-base text-red-500">Email</span>
+                                        </button>
+                                        <button
+                                            onClick={async () => {
+                                                const text = generatedContent.content.replace(/<[^>]*>/g, '');
+                                                navigator.clipboard.writeText(text);
+                                                setSuccessMessage(t('history.copied'));
+                                                setTimeout(() => setSuccessMessage(null), 2000);
+                                                setShowShareMenu(false);
+                                            }}
+                                            className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded-lg text-xs font-medium text-gray-700 transition"
+                                        >
+                                            <span className="text-base text-remix-600">{t('general.shareOther')}</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {successMessage && (
-                        <div className="mt-2 text-center text-sm text-green-600 font-medium">
+                        <div className="mt-2 text-center text-xs text-green-600 font-medium">
                             {successMessage}
                         </div>
                     )}
+
+                    {/* Chat messages */}
+                    {chatMessages.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                            {chatMessages.map((msg, i) => (
+                                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[85%] px-3 py-1.5 rounded-xl text-xs ${
+                                        msg.role === 'user'
+                                            ? 'bg-remix-600 text-white rounded-br-sm'
+                                            : 'bg-gray-100 text-gray-700 rounded-bl-sm'
+                                    }`}>
+                                        {msg.content}
+                                    </div>
+                                </div>
+                            ))}
+                            {chatLoading && (
+                                <div className="flex justify-start">
+                                    <div className="bg-gray-100 text-gray-400 px-3 py-1.5 rounded-xl rounded-bl-sm text-xs">
+                                        <span className="animate-pulse">...</span>
+                                    </div>
+                                </div>
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+                    )}
                 </main>
+
+                {/* Chat input - fixed at bottom */}
+                {!isEditing && (
+                    <div className="px-4 py-3 bg-white border-t border-gray-200">
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={chatInput}
+                                onChange={e => setChatInput(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleChatSend()}
+                                placeholder="Refine: 'make it shorter', 'add emojis'..."
+                                className="flex-1 text-xs border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-remix-400"
+                                disabled={chatLoading}
+                            />
+                            <button
+                                onClick={handleChatSend}
+                                disabled={chatLoading || !chatInput.trim()}
+                                className="bg-remix-600 text-white px-3 py-2 rounded-xl hover:bg-remix-700 transition disabled:opacity-40"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
         )
     }
@@ -961,9 +1220,12 @@ const SidePanel = () => {
                 </button>
                 <button
                     onClick={() => setActiveTab('history')}
-                    className={`flex-1 py-2 text-sm font-medium border-b-2 transition ${activeTab === 'history' ? 'border-remix-600 text-remix-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                    className={`flex-1 py-2 text-sm font-medium border-b-2 transition relative ${activeTab === 'history' ? 'border-remix-600 text-remix-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
                 >
                     {t('tabs.history')}
+                    {sendingCount > 0 && (
+                        <span className="absolute top-1.5 ml-0.5 inline-block h-2 w-2 rounded-full bg-remix-500 animate-pulse" />
+                    )}
                 </button>
                 <button
                     onClick={() => setActiveTab('account')}
@@ -981,14 +1243,51 @@ const SidePanel = () => {
                             <div className="flex flex-col items-center justify-center py-16 text-center px-6 animate-in fade-in duration-700">
                                 <div className="relative mb-12">
                                     {/* Pulse effect */}
-                                    <div className="absolute inset-0 bg-remix-500 rounded-full animate-radar opacity-20"></div>
-                                    <div className="absolute inset-0 bg-remix-400 rounded-full animate-radar opacity-10 [animation-delay:1s]"></div>
+                                    {loading && <div className="absolute inset-0 bg-remix-500 rounded-full animate-radar opacity-20"></div>}
+                                    {loading && <div className="absolute inset-0 bg-remix-400 rounded-full animate-radar opacity-10 [animation-delay:1s]"></div>}
 
-                                    {/* Main scanner circle */}
-                                    <div className="relative bg-white h-24 w-24 rounded-full border border-gray-200 border-4 border-white flex items-center justify-center text-4xl overflow-hidden z-10 transition-transform hover:scale-105 duration-300">
-                                        <img src="/scan.webp" alt="" className={`w-24 h-24 ${loading ? "animate-bounce" : ""}`} />
-                                        {/* Horizontal scan line */}
-                                        {loading && <div className="absolute left-0 right-0 h-1 bg-remix-400/40 animate-scan z-20"></div>}
+                                    {/* Chameleon eye */}
+                                    <div className="relative h-24 w-24 rounded-full flex items-center justify-center overflow-hidden z-10 transition-transform hover:scale-105 duration-300">
+                                        <svg viewBox="0 0 96 96" className="w-24 h-24">
+                                            <circle cx="48" cy="48" r="46" fill="white" />
+                                            <circle cx="48" cy="48" r="28" fill="#dc2626" opacity="0.15" />
+                                            {/* Pupil group */}
+                                            <g>
+                                                <animateTransform
+                                                    attributeName="transform"
+                                                    type="translate"
+                                                    values="0,0; 12,-6; 8,10; -10,4; -6,-12; 14,2; -4,14; -12,-8; 6,-10; 0,0"
+                                                    keyTimes="0;0.1;0.2;0.35;0.5;0.6;0.72;0.82;0.92;1"
+                                                    dur="3.5s"
+                                                    repeatCount="indefinite"
+                                                    calcMode="spline"
+                                                    keySplines="0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1"
+                                                />
+                                                <circle cx="48" cy="48" r="14" fill="#dc2626" />
+                                                <circle cx="48" cy="48" r="7" fill="#1a1a1a" />
+                                                <circle cx="43" cy="43" r="3" fill="white" opacity="0.7" />
+                                            </g>
+                                            {/* Eyelid blink - top */}
+                                            <ellipse cx="48" cy="-44" rx="50" ry="46" fill="#f3f4f6">
+                                                <animate
+                                                    attributeName="cy"
+                                                    values="-44;-44;-44;48;-44;-44;-44;-44;-44;-44;48;48;-44;-44"
+                                                    keyTimes="0;0.28;0.30;0.34;0.38;0.40;0.64;0.66;0.70;0.72;0.74;0.76;0.80;1"
+                                                    dur="4.5s"
+                                                    repeatCount="indefinite"
+                                                />
+                                            </ellipse>
+                                            {/* Eyelid blink - bottom */}
+                                            <ellipse cx="48" cy="140" rx="50" ry="46" fill="#f3f4f6">
+                                                <animate
+                                                    attributeName="cy"
+                                                    values="140;140;140;48;140;140;140;140;140;140;48;48;140;140"
+                                                    keyTimes="0;0.28;0.30;0.34;0.38;0.40;0.64;0.66;0.70;0.72;0.74;0.76;0.80;1"
+                                                    dur="4.5s"
+                                                    repeatCount="indefinite"
+                                                />
+                                            </ellipse>
+                                        </svg>
                                     </div>
                                 </div>
 
@@ -1070,36 +1369,7 @@ const SidePanel = () => {
                                     </div>
                                 )}
 
-                                {/* Modal d'upgrade */}
-                                {showUpgradeModal && (
-                                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-                                        <div className="absolute inset-0 bg-remix-900/60 backdrop-blur-sm" onClick={() => setShowUpgradeModal(false)}></div>
-                                        <div className="relative bg-white w-full max-w-sm rounded-2xl border border-gray-200 overflow-hidden animate-in zoom-in-95 duration-200">
-                                            <div className="bg-remix-600 p-6 text-white text-center">
-                                                <span className="text-4xl mb-3 block">🚀</span>
-                                                <h3 className="text-lg font-bold mb-1">{t('upgrade.modalTitle')}</h3>
-                                                <p className="text-remix-100 text-xs">
-                                                    {trialExpired ? t('upgrade.trialExpiredDesc') : t('upgrade.modalDesc')}
-                                                </p>
-                                            </div>
-                                            <div className="p-6 space-y-4">
-                                                <button
-                                                    onClick={openPricingPage}
-                                                    className="w-full bg-remix-600 text-white py-3 rounded-xl font-bold hover:bg-remix-700 transition flex items-center justify-center gap-2"
-                                                >
-                                                    {t('upgrade.seePlans')}
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-                                                </button>
-                                                <button
-                                                    onClick={() => setShowUpgradeModal(false)}
-                                                    className="w-full text-gray-400 text-xs font-semibold hover:text-gray-600 transition"
-                                                >
-                                                    {t('upgrade.later')}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
+                                {/* Modal d'upgrade moved outside tabs */}
                                 {/* Barre d'utilisation */}
                                 <div className="mb-4 bg-white p-3 rounded-xl border border-gray-100">
                                     <div className="flex justify-between items-center mb-1.5">
@@ -1135,7 +1405,7 @@ const SidePanel = () => {
                                     )}
                                 </div>
 
-                                <div className="bg-white p-4 rounded-lg  border border-gray-100 mb-6 relative overflow-hidden group">
+                                <div className={`bg-white p-4 rounded-lg border border-gray-100 mb-6 relative overflow-hidden group transition-all ${articleFlyOut ? 'article-fly-out' : ''}`}>
                                     {userPlan !== 'trial' && (
                                         <div className="absolute top-0 right-0">
                                             <div className="bg-remix-600 text-[8px] font-bold text-white px-3 py-1 rotate-45 translate-x-4 -translate-y-1  uppercase tracking-tighter">{userPlan === 'pro' ? t('templates.proBadge') : t('templates.starterBadge')}</div>
@@ -1210,19 +1480,10 @@ const SidePanel = () => {
                                         <div className="flex gap-2 relative">
                                             <button
                                                 onClick={() => selectedTemplate && sendToWebhook(selectedTemplate.id, selectedTemplate.prompt, selectedTemplate.name)}
-                                                disabled={sending || !selectedTemplate}
-                                                className="flex-1 bg-remix-600 text-white py-3 rounded-xl font-bold text-lg  hover:bg-remix-700 hover:scale-[1.02] active:scale-[0.98] transition disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2"
+                                                disabled={!selectedTemplate || remorphCooldown}
+                                                className={`flex-1 py-3 rounded-xl font-bold text-lg transition flex items-center justify-center gap-2 ${remorphCooldown ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-remix-600 text-white hover:bg-remix-700 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:scale-100'}`}
                                             >
-                                                {sending ? (
-                                                    <>
-                                                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                                                        {t('templates.transforming')}
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <img src="/WhiteIcon512.png" alt="" style={{width: '20px', height: '20px'}} /> {t('templates.transform')}
-                                                    </>
-                                                )}
+                                                <img src="/WhiteIcon512.png" alt="" style={{width: '20px', height: '20px', opacity: remorphCooldown ? 0.4 : 1}} /> {remorphCooldown ? t('templates.transforming') : t('templates.transform')}
                                             </button>
                                             <button
                                                 onClick={() => setShowTemplateSelector(!showTemplateSelector)}
@@ -1260,6 +1521,7 @@ const SidePanel = () => {
                                                                     <button
                                                                         onClick={() => {
                                                                             setSelectedTemplate(templateitem);
+                                                                            localStorage.setItem('remorphit_last_template', templateitem.id);
                                                                             setShowTemplateSelector(false);
                                                                         }}
                                                                         className="flex-1 text-left min-w-0"
@@ -1308,6 +1570,7 @@ const SidePanel = () => {
                                                                         <button
                                                                             onClick={() => {
                                                                                 setSelectedTemplate(templateitem);
+                                                                                localStorage.setItem('remorphit_last_template', templateitem.id);
                                                                                 setShowTemplateSelector(false);
                                                                             }}
                                                                             className="flex-1 text-left min-w-0"
@@ -1508,21 +1771,36 @@ const SidePanel = () => {
                                 <p className="text-sm">{t('history.noHistory')}</p>
                             </div>
                         ) : (
-                            history.map(item => (
-                                <div key={item.id} className="bg-white rounded-xl  border border-gray-100 overflow-hidden relative group">
+                            history.map(item => {
+                                const isPending = item.id.startsWith('pending-');
+                                const isNew = newHistoryIds.has(item.id);
+                                return (
+                                <div key={item.id} className={`rounded-xl border overflow-hidden relative group transition-all duration-500 ${isPending ? 'bg-white border-remix-200 animate-pulse' : isNew ? 'bg-green-50 border-green-300 ring-2 ring-green-200' : 'bg-white border-gray-100'}`}>
                                     <div className="p-4">
                                         <div className="flex items-start justify-between mb-2">
-                                            <span className="px-2 py-0.5 bg-remix-50 text-remix-600 rounded text-[10px] font-bold uppercase tracking-tight">
-                                                {item.template_name}
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-tight ${isPending ? 'bg-remix-100 text-remix-500' : 'bg-remix-50 text-remix-600'}`}>
+                                                {isPending ? t('templates.transforming') : item.template_name}
                                             </span>
                                             <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                                                {new Date(item.created_at).toLocaleDateString()}
+                                                {isPending ? (
+                                                    <svg className="animate-spin h-3 w-3 text-remix-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                                                ) : isNew ? (
+                                                    <span className="text-[9px] font-bold bg-green-500 text-white px-1.5 py-0.5 rounded-full animate-bounce">NEW</span>
+                                                ) : new Date(item.created_at).toLocaleDateString()}
                                             </span>
                                         </div>
                                         <h4 className="text-sm font-semibold text-gray-900 mb-2 line-clamp-1">{item.title}</h4>
+                                        {isPending ? (
+                                            <div className="flex gap-1 mb-3">
+                                                <div className="h-2 bg-gray-200 rounded-full w-3/4 animate-pulse"></div>
+                                                <div className="h-2 bg-gray-200 rounded-full w-1/4 animate-pulse"></div>
+                                            </div>
+                                        ) : (
                                         <div className="text-xs text-gray-600 line-clamp-3 mb-3 bg-gray-50 p-2 rounded">
                                             {item.content.replace(/<[^>]*>/g, '').substring(0, 150)}...
                                         </div>
+                                        )}
+                                        {!isPending && (
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => {
@@ -1576,7 +1854,9 @@ const SidePanel = () => {
                                                 {t('history.source')}
                                             </a>
                                         </div>
+                                        )}
                                     </div>
+                                    {!isPending && (
                                     <button
                                         onClick={() => handleDeleteHistory(item.id)}
                                         className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition z-10 bg-white/80"
@@ -1584,8 +1864,9 @@ const SidePanel = () => {
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
                                     </button>
+                                    )}
                                 </div>
-                            ))
+                            );})
                         )}
                     </div>
                 )}
@@ -1652,21 +1933,16 @@ const SidePanel = () => {
 
                                 <div className="pt-4 border-t border-gray-100 space-y-4">
                                     <div className="flex items-center justify-between">
-                                        <span className="text-sm font-semibold text-gray-700">{t('account.language')}</span>
-                                        <div className="flex bg-gray-100 p-1 rounded-lg">
-                                            <button
-                                                onClick={() => toggleLanguage('en')}
-                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${lang === 'en' ? 'bg-white  text-remix-600' : 'text-gray-500'}`}
-                                            >
-                                                EN
-                                            </button>
-                                            <button
-                                                onClick={() => toggleLanguage('fr')}
-                                                className={`px-3 py-1 text-xs font-bold rounded-md transition ${lang === 'fr' ? 'bg-white  text-remix-600' : 'text-gray-500'}`}
-                                            >
-                                                FR
-                                            </button>
-                                        </div>
+                                        <span className="text-sm font-semibold text-gray-700">{t('account.generationLanguage')}</span>
+                                        <select
+                                            value={generationLang}
+                                            onChange={e => changeGenerationLang(e.target.value)}
+                                            className="text-xs font-bold text-remix-600 bg-gray-100 border-none rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-remix-400 outline-none cursor-pointer"
+                                        >
+                                            {GENERATION_LANGUAGES.map(l => (
+                                                <option key={l.code} value={l.code}>{l.label}</option>
+                                            ))}
+                                        </select>
                                     </div>
 
                                     <button
@@ -1700,6 +1976,151 @@ const SidePanel = () => {
                     </div>
                 )}
             </main>
+
+                {/* Modal d'upgrade - pricing view */}
+                {showUpgradeModal && (
+                    <div className="fixed inset-0 z-[100] flex flex-col">
+                        <div className="absolute inset-0 bg-remix-900/60 backdrop-blur-sm" onClick={() => setShowUpgradeModal(false)}></div>
+                        <div className="relative flex-1 flex flex-col bg-white w-full overflow-y-auto animate-in slide-in-from-bottom duration-300">
+                            {/* Header */}
+                            <div className="bg-remix-600 px-4 py-5 text-white text-center relative">
+                                <button onClick={() => setShowUpgradeModal(false)} className="absolute top-3 right-3 text-white/70 hover:text-white">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                </button>
+                                <h3 className="text-lg font-bold mb-1">{t('upgrade.modalTitle')}</h3>
+                                <p className="text-remix-100 text-xs">
+                                    {trialExpired ? t('upgrade.trialExpiredDesc') : t('upgrade.modalDesc')}
+                                </p>
+                                {/* Billing toggle */}
+                                <div className="flex justify-center mt-4">
+                                    <div className="bg-white/20 backdrop-blur-sm p-1 rounded-lg flex">
+                                        <button
+                                            onClick={() => setBillingPeriod('monthly')}
+                                            className={`px-4 py-1.5 text-xs font-bold rounded-md transition ${billingPeriod === 'monthly' ? 'bg-white text-remix-600' : 'text-white/80 hover:text-white'}`}
+                                        >
+                                            {t('upgrade.monthly')}
+                                        </button>
+                                        <button
+                                            onClick={() => setBillingPeriod('yearly')}
+                                            className={`px-4 py-1.5 text-xs font-bold rounded-md transition flex items-center gap-1.5 ${billingPeriod === 'yearly' ? 'bg-white text-remix-600' : 'text-white/80 hover:text-white'}`}
+                                        >
+                                            {t('upgrade.yearly')}
+                                            <span className="bg-green-500 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold">
+                                                {t('upgrade.savePercent').replace('{percent}', '27')}
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Plan cards */}
+                            <div className="p-4 space-y-4 flex-1">
+                                {/* Starter Plan */}
+                                <div className={`rounded-2xl border overflow-hidden ${userPlan === 'starter' ? 'border-blue-300 bg-blue-50/50' : 'border-gray-200 bg-white'}`}>
+                                    <div className="p-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h4 className="text-base font-bold text-gray-900">{t('upgrade.starterName')}</h4>
+                                            {userPlan === 'starter' && (
+                                                <span className="text-[10px] font-bold bg-blue-500 text-white px-2 py-0.5 rounded-full">{t('upgrade.currentPlan')}</span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-baseline gap-1 mb-3">
+                                            <span className="text-3xl font-black text-gray-900">
+                                                {billingPeriod === 'monthly' ? t('upgrade.starterPrice').monthly : t('upgrade.starterPrice').yearly}
+                                            </span>
+                                            <span className="text-sm text-gray-400 font-medium">
+                                                EUR{billingPeriod === 'monthly' ? t('upgrade.perMonth') : t('upgrade.perYear')}
+                                            </span>
+                                        </div>
+                                        <ul className="space-y-2 mb-4">
+                                            {['starterTransformations', 'starterTemplates', 'starterHistory', 'starterChat'].map(key => (
+                                                <li key={key} className="flex items-center gap-2 text-xs text-gray-600">
+                                                    <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                                    {t(`upgrade.features.${key}`)}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        {userPlan === 'starter' ? (
+                                            <button
+                                                onClick={openCustomerPortal}
+                                                className="w-full py-2.5 rounded-xl text-sm font-bold border border-blue-300 text-blue-600 hover:bg-blue-50 transition"
+                                            >
+                                                {t('account.manage')}
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => handleCheckout('starter')}
+                                                disabled={!!checkoutLoading}
+                                                className="w-full py-2.5 rounded-xl text-sm font-bold bg-gray-900 text-white hover:bg-gray-800 transition disabled:opacity-50"
+                                            >
+                                                {checkoutLoading === 'starter' ? '...' : t('upgrade.subscribe')}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Pro Plan */}
+                                <div className={`rounded-2xl border overflow-hidden relative ${userPlan === 'pro' ? 'border-remix-300 bg-remix-50/50' : 'border-remix-200 bg-white ring-2 ring-remix-500'}`}>
+                                    {userPlan !== 'pro' && (
+                                        <div className="absolute top-0 right-4 bg-remix-600 text-white text-[10px] font-bold px-3 py-1 rounded-b-lg">
+                                            {t('upgrade.popular')}
+                                        </div>
+                                    )}
+                                    <div className="p-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h4 className="text-base font-bold text-gray-900">{t('upgrade.proName')}</h4>
+                                            {userPlan === 'pro' && (
+                                                <span className="text-[10px] font-bold bg-remix-600 text-white px-2 py-0.5 rounded-full">{t('upgrade.currentPlan')}</span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-baseline gap-1 mb-3">
+                                            <span className="text-3xl font-black text-gray-900">
+                                                {billingPeriod === 'monthly' ? t('upgrade.proPrice').monthly : t('upgrade.proPrice').yearly}
+                                            </span>
+                                            <span className="text-sm text-gray-400 font-medium">
+                                                EUR{billingPeriod === 'monthly' ? t('upgrade.perMonth') : t('upgrade.perYear')}
+                                            </span>
+                                        </div>
+                                        <ul className="space-y-2 mb-4">
+                                            {['proTransformations', 'proTemplates', 'proHistory', 'proChat', 'proPriority'].map(key => (
+                                                <li key={key} className="flex items-center gap-2 text-xs text-gray-600">
+                                                    <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                                    {t(`upgrade.features.${key}`)}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        {userPlan === 'pro' ? (
+                                            <button
+                                                onClick={openCustomerPortal}
+                                                className="w-full py-2.5 rounded-xl text-sm font-bold border border-remix-300 text-remix-600 hover:bg-remix-50 transition"
+                                            >
+                                                {t('account.manage')}
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => handleCheckout('pro')}
+                                                disabled={!!checkoutLoading}
+                                                className="w-full py-2.5 rounded-xl text-sm font-bold bg-remix-600 text-white hover:bg-remix-700 transition disabled:opacity-50"
+                                            >
+                                                {checkoutLoading === 'pro' ? '...' : t('upgrade.subscribe')}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Close button at bottom */}
+                            <div className="p-4 pt-0">
+                                <button
+                                    onClick={() => setShowUpgradeModal(false)}
+                                    className="w-full text-gray-400 text-xs font-semibold hover:text-gray-600 transition py-2"
+                                >
+                                    {t('upgrade.later')}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
         </div>
     );
 };

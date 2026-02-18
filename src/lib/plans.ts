@@ -22,7 +22,7 @@ export const STRIPE_PRICE_TO_PLAN: Record<string, PlanType> = {
     [import.meta.env.VITE_STRIPE_PRO_YEARLY_PRICE_ID || 'price_pro_yearly']: 'pro',
 };
 
-export const WEBSITE_URL = import.meta.env.VITE_WEBSITE_URL || 'https://remorphit.com';
+export const WEBSITE_URL = import.meta.env.VITE_WEBSITE_URL || 'https://remorph.it';
 
 export function isTrialExpired(createdAt: string | null): boolean {
     if (!createdAt) return false;

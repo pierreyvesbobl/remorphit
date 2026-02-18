@@ -59,7 +59,7 @@ Deno.serve(async (req) => {
     // Create Stripe Customer Portal session
     const portalSession = await stripe.billingPortal.sessions.create({
       customer: profile.stripe_customer_id,
-      return_url: Deno.env.get('WEBSITE_URL') || 'https://remorphit.com',
+      return_url: Deno.env.get('WEBSITE_URL') || 'https://remorph.it',
     });
 
     return new Response(JSON.stringify({ url: portalSession.url }), {

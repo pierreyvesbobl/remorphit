@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { signInWithGoogleViaExtension } from '../lib/googleAuth';
-import { translations, type Language } from '../lib/i18n';
+import { translations } from '../lib/i18n';
 import '../index.css';
 
 const Auth = () => {
@@ -11,19 +11,10 @@ const Auth = () => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [message, setMessage] = useState<string | null>(null);
-    const [lang, setLang] = useState<Language>('en');
-
-    useEffect(() => {
-        chrome.storage.local.get(['language'], (result) => {
-            if (result.language) {
-                setLang(result.language as Language);
-            }
-        });
-    }, []);
 
     const t = (path: string) => {
         const keys = path.split('.');
-        let current: any = translations[lang];
+        let current: any = translations;
         for (const key of keys) {
             if (current && current[key]) {
                 current = current[key];
@@ -34,11 +25,6 @@ const Auth = () => {
         return current;
     };
 
-    const toggleLanguage = (newLang: Language) => {
-        setLang(newLang);
-        chrome.storage.local.set({ language: newLang });
-    };
-
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
@@ -47,7 +33,6 @@ const Auth = () => {
 
         try {
             if (isLogin) {
-                // Connexion
                 const { data, error } = await supabase.auth.signInWithPassword({
                     email,
                     password,
@@ -56,11 +41,9 @@ const Auth = () => {
                 if (error) throw error;
 
                 if (data.user) {
-                    // Rediriger vers le side panel
                     window.location.href = '/src/sidepanel/index.html';
                 }
             } else {
-                // Inscription
                 const { data, error } = await supabase.auth.signUp({
                     email,
                     password,
@@ -119,7 +102,7 @@ const Auth = () => {
                             onChange={(e) => setEmail(e.target.value)}
                             required
                             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-remix-500 focus:border-transparent outline-none transition"
-                            placeholder="vous@exemple.com"
+                            placeholder="you@example.com"
                         />
                     </div>
 
@@ -191,21 +174,6 @@ const Auth = () => {
                         className="text-sm text-remix-600 hover:text-remix-800 font-medium"
                     >
                         {isLogin ? `${t('auth.noAccount')} ${t('auth.signup')}` : `${t('auth.hasAccount')} ${t('auth.login')}`}
-                    </button>
-                </div>
-
-                <div className="mt-8 flex justify-center bg-gray-50 p-2 rounded-xl border border-gray-100 w-fit mx-auto">
-                    <button
-                        onClick={() => toggleLanguage('en')}
-                        className={`px-4 py-1.5 text-xs font-bold rounded-lg transition ${lang === 'en' ? 'bg-white  text-remix-600' : 'text-gray-400 hover:text-gray-600'}`}
-                    >
-                        ENGLISH
-                    </button>
-                    <button
-                        onClick={() => toggleLanguage('fr')}
-                        className={`px-4 py-1.5 text-xs font-bold rounded-lg transition ${lang === 'fr' ? 'bg-white  text-remix-600' : 'text-gray-400 hover:text-gray-600'}`}
-                    >
-                        FRANÇAIS
                     </button>
                 </div>
             </div>
