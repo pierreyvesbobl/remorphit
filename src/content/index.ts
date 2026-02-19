@@ -947,9 +947,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                     }
 
                     // 3. Extract images from the article content (Readability returns HTML)
-                    const tempDiv = document.createElement('div');
-                    tempDiv.innerHTML = article.content || '';
-                    tempDiv.querySelectorAll('img').forEach(img => {
+                    const parser = new DOMParser();
+                    const tempDoc = parser.parseFromString(article.content || '', 'text/html');
+                    tempDoc.querySelectorAll('img').forEach(img => {
                         const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
                         if (!src) return;
                         const fullUrl = src.startsWith('http') ? src : new URL(src, window.location.origin).href;
@@ -1027,10 +1027,11 @@ const createToggleButton = () => {
     btn.id = 'remorphit-toggle-btn';
 
     // Using the white chameleon icon
-    const iconUrl = chrome.runtime.getURL('WhiteIcon512.png');
-    btn.innerHTML = `
-        <img src="${iconUrl}" alt="ReMorphIt" style="width: 24px; height: 24px; object-fit: contain;" />
-    `;
+    const iconImg = document.createElement('img');
+    iconImg.src = chrome.runtime.getURL('WhiteIcon512.png');
+    iconImg.alt = 'ReMorphIt';
+    iconImg.style.cssText = 'width: 24px; height: 24px; object-fit: contain;';
+    btn.appendChild(iconImg);
 
     btn.title = 'Open ReMorphIt';
 

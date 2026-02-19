@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { signInWithGoogleViaExtension } from '../lib/googleAuth';
 import { translations, GENERATION_LANGUAGES } from '../lib/i18n';
+import DOMPurify from 'dompurify';
 import { type PlanType, PLAN_LIMITS, TRIAL_DURATION_DAYS, isTrialExpired } from '../lib/plans';
 import '../index.css';
 
@@ -802,7 +803,7 @@ const SidePanel = () => {
                 body: { priceId, uid: user.id, email: user.email },
             });
             if (error) throw error;
-            if (data?.url) {
+            if (data?.url && data.url.startsWith('https://')) {
                 chrome.tabs.create({ url: data.url });
                 setShowUpgradeModal(false);
             }
@@ -817,7 +818,7 @@ const SidePanel = () => {
         try {
             const { data, error } = await supabase.functions.invoke('create-portal-session');
             if (error) throw error;
-            if (data?.url) chrome.tabs.create({ url: data.url });
+            if (data?.url && data.url.startsWith('https://')) chrome.tabs.create({ url: data.url });
         } catch (err) {
             console.error('Portal session error:', err);
             setShowUpgradeModal(true);
@@ -1053,12 +1054,15 @@ const SidePanel = () => {
                             <div
                                 className={`generated-content text-sm text-gray-800 p-4 transition-all duration-700 ${contentUpdated ? 'content-flash' : ''}`}
                                 dangerouslySetInnerHTML={{
-                                    __html: /<[a-z][\s\S]*>/i.test(generatedContent.content)
-                                        ? generatedContent.content
-                                        : generatedContent.content
-                                            .replace(/\n\n/g, '</p><p>')
-                                            .replace(/^(.+)/, '<p>$1</p>')
-                                            .replace(/<p><\/p>/g, '')
+                                    __html: DOMPurify.sanitize(
+                                        /<[a-z][\s\S]*>/i.test(generatedContent.content)
+                                            ? generatedContent.content
+                                            : generatedContent.content
+                                                .replace(/\n\n/g, '</p><p>')
+                                                .replace(/^(.+)/, '<p>$1</p>')
+                                                .replace(/<p><\/p>/g, ''),
+                                        { ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'li', 'a', 'blockquote', 'span', 'div'], ALLOWED_ATTR: ['href', 'target', 'rel', 'class'] }
+                                    )
                                 }}
                             />
                         )}
@@ -1969,7 +1973,7 @@ const SidePanel = () => {
                             <p className="text-xs text-remix-700 leading-relaxed mb-3">
                                 {t('account.helpDesc')}
                             </p>
-                            <a href="mailto:hello@automato.tech" className="text-xs font-bold text-remix-600 hover:text-remix-800 flex items-center gap-1">
+                            <a href="mailto:contact@remorph.it" className="text-xs font-bold text-remix-600 hover:text-remix-800 flex items-center gap-1">
                                 {t('account.contactSupport')} <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
                             </a>
                         </div>

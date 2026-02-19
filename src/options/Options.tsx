@@ -13,6 +13,20 @@ const Options = () => {
     }, []);
 
     const saveOptions = () => {
+        if (webhookUrl) {
+            try {
+                const parsed = new URL(webhookUrl);
+                if (parsed.protocol !== 'https:') {
+                    setStatus('Error: Only HTTPS URLs are allowed.');
+                    setTimeout(() => setStatus(''), 3000);
+                    return;
+                }
+            } catch {
+                setStatus('Error: Invalid URL format.');
+                setTimeout(() => setStatus(''), 3000);
+                return;
+            }
+        }
         chrome.storage.sync.set({ n8nWebhookUrl: webhookUrl }, () => {
             setStatus('Options saved.');
             setTimeout(() => setStatus(''), 2000);

@@ -23,7 +23,7 @@ export async function signInWithGoogleViaExtension() {
     });
 
     if (!responseUrl) {
-        throw new Error('L\'authentification a été annulée.');
+        throw new Error('Authentication was cancelled.');
     }
 
     // 4. Parse tokens from the response URL
@@ -59,8 +59,8 @@ export async function signInWithGoogleViaExtension() {
     const oauthError = hashParams.get('error') || urlObj.searchParams.get('error');
     const errorDesc = hashParams.get('error_description') || urlObj.searchParams.get('error_description');
     if (oauthError) {
-        throw new Error(`Erreur OAuth: ${oauthError} - ${errorDesc || ''}`);
+        throw new Error(`OAuth error: ${oauthError} - ${errorDesc || ''}`);
     }
 
-    throw new Error('Échec de l\'authentification: aucun token reçu.');
+    throw new Error('Authentication failed: no token received.');
 }

@@ -6,20 +6,15 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
         id: 'remorphit-main',
-        title: 'ReMorphIt : Transformer ce contenu',
+        title: 'ReMorphIt: Transform this content',
         contexts: ['selection', 'page'],
     });
 });
 
 chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) => {
     if (info.menuItemId === 'remorphit-main') {
-        // Open the side panel
-        // Note: chrome.sidePanel.open is only available in user-gesture context.
-        // Making sure we open the side panel on the current window.
         if (tab && tab.id && tab.windowId) {
             chrome.sidePanel.open({ windowId: tab.windowId });
-            // We might want to send the selection to the sidepanel via messaging or storage
-            // For now, let's just save it to storage so sidepanel can read it on load
             chrome.storage.local.set({
                 pendingContent: {
                     selectionText: info.selectionText,
@@ -32,8 +27,6 @@ chrome.contextMenus.onClicked.addListener((info: chrome.contextMenus.OnClickData
 });
 
 // Relay tab navigation events to side panel via chrome.storage.session
-// This is the most reliable IPC in Chrome extensions - storage.onChanged
-// fires in ALL extension contexts (side panel, popup, options page).
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (tab.active && (changeInfo.status === 'complete' || changeInfo.url)) {
         chrome.storage.session.set({
@@ -52,12 +45,38 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
     });
 });
 
+// Validate that a URL is safe for fetch (HTTPS only, no local/internal URLs)
+function isValidWebhookUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+// Validate sender is from our own extension
+function isExtensionSender(sender: chrome.runtime.MessageSender): boolean {
+    return sender.id === chrome.runtime.id;
+}
+
 // Handle messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Only accept messages from our own extension
+    if (!isExtensionSender(sender)) return;
+
     if (request.action === 'SEND_WEBHOOK') {
+        const url = request.url;
+
+        // Validate webhook URL
+        if (!url || !isValidWebhookUrl(url)) {
+            sendResponse({ success: false, error: 'Invalid webhook URL. Only HTTPS URLs are allowed.' });
+            return true;
+        }
+
         (async () => {
             try {
-                const response = await fetch(request.url, {
+                const response = await fetch(url, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -80,15 +99,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'OPEN_SIDE_PANEL') {
-        // This requires a valid tab and window
         if (sender.tab && sender.tab.id && sender.tab.windowId) {
-            // Side panel opening requires user gesture. 
-            // IMPORTANT: chrome.sidePanel.open can ONLY be called inside a user action handler (like context menu click or extension icon click).
-            // It CANNOT be called from a content script message unless that message was initiated by a user gesture AND the browser supports it (recent Chrome versions are stricter).
-            // However, let's try. If it fails, we might need checking permission.
             chrome.sidePanel.open({ windowId: sender.tab.windowId, tabId: sender.tab.id })
                 .catch(err => console.error("Could not open side panel:", err));
         }
     }
 });
-
